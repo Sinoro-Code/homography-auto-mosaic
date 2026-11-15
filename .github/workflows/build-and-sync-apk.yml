@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -61,18 +61,27 @@ jobs:
           echo "FAM_NDK_VERSION=${NDK_VER}" >> "${GITHUB_ENV}"
           echo "Resolved NDK: ${NDK_DIR} (FAM_NDK_VERSION=${NDK_VER})"
 
-      - name: Cache Prebuilt NDK Static Third-Party (OpenCV 4.10 + libjpeg-turbo 3.0)
+      - name: Restore Cached NDK Static Third-Party (OpenCV 4.10 + libjpeg-turbo 3.0)
         id: third-party-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: app/src/main/cpp/third_party
           key: android-ndk-third-party-v2-${{ hashFiles('scripts/build_third_party_android.sh') }}
 
       - name: Cross-Compile Third-Party Static Libraries (Cold Run Only)
         if: steps.third-party-cache.outputs.cache-hit != 'true'
+        env:
+          BUILD_WORK_DIR: ${{ runner.temp }}/native-deps-build
         run: |
           chmod +x ./scripts/build_third_party_android.sh
           ./scripts/build_third_party_android.sh
+
+      - name: Save NDK Static Third-Party Cache
+        if: steps.third-party-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: app/src/main/cpp/third_party
+          key: android-ndk-third-party-v2-${{ hashFiles('scripts/build_third_party_android.sh') }}
 
       - name: Cache Native CMake/Ninja Incremental Objects (.cxx)
         uses: actions/cache@v4
