@@ -135,10 +135,9 @@ cmake --build build-host-tests
 ### 5.3 GitHub Actions 全自動打包與 Google 雲端硬碟永久免重連同步
 
 本專案已內建 `.github/workflows/build-and-sync-apk.yml`。每次推送原始碼至 `main` 分支時，GitHub 雲端即自動利用多層快取（NDK 靜態庫快取 + CMake `.cxx` 快取 + Gradle Build Cache）極速編譯最新 `自碼系統.apk`，並同時：
-1. **發佈至 GitHub Releases 固定下載網址**（手機可直接點擊下載）：
-   - 中文檔名：`https://github.com/Sinoro-Code/homography-auto-mosaic/releases/latest/download/%E8%87%AA%E7%A2%BC%E7%B3%BB%E7%B5%B1.apk`
-   - 英文別名：`https://github.com/Sinoro-Code/homography-auto-mosaic/releases/latest/download/AutoMosaic.apk`
-2. **原地覆寫至 Google 雲端硬碟「`自碼系統`」資料夾**（永久免重新登入、保留原檔案連結）：
+1. **發佈至 GitHub Releases 固定下載網址**（顯示名稱 `自碼系統.apk`，手機可直接點擊下載）：
+   - 固定直連網址：`https://github.com/Sinoro-Code/homography-auto-mosaic/releases/latest/download/AutoMosaic.apk`
+2. **原地覆寫至 Google 雲端硬碟「`自碼系統`」資料夾內之 `自碼系統.apk`**（永久免重新登入、保留原檔案連結）：
 
 #### 一次性 Google Cloud 服務帳戶設定步驟（設定一次，永久有效）
 1. 前往 [Google Cloud Console](https://console.cloud.google.com/) 建立或選取任一免費專案，於 **APIs & Services -> Library** 搜尋並啟用 **Google Drive API**。

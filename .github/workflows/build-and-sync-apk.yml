@@ -140,8 +140,7 @@ jobs:
           - **SHA-256**: \`${SHA256_VAL}\`
 
           ### 手機固定直連下載網址
-          - **中文檔名**: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/%E8%87%AA%E7%A2%BC%E7%B3%BB%E7%B5%B1.apk
-          - **英文別名**: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/AutoMosaic.apk
+          - **GitHub Releases 直連下載 (\`自碼系統.apk\`)**: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/AutoMosaic.apk
           EOF
           )
 
@@ -156,11 +155,11 @@ jobs:
               --title "自碼系統 最新自動打包版 (${SHORT_SHA})" \
               --notes "${NOTES}" \
               --latest
-            gh release upload latest "${APK_CN}" "${APK_EN}" \
+            gh release upload latest "${APK_EN}#自碼系統.apk" \
               --repo "${GITHUB_REPOSITORY}" \
               --clobber
           else
-            gh release create latest "${APK_CN}" "${APK_EN}" \
+            gh release create latest "${APK_EN}#自碼系統.apk" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "自碼系統 最新自動打包版 (${SHORT_SHA})" \
               --notes "${NOTES}" \
@@ -178,9 +177,8 @@ jobs:
             cat <<EOF >> "${GITHUB_STEP_SUMMARY}"
           ### Google 雲端硬碟同步狀態：待設定一次性 \`GDRIVE_SERVICE_ACCOUNT_JSON\`
           - 本次建置已成功發佈至 **GitHub Releases 固定網址**：
-            - [下載 自碼系統.apk](https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/%E8%87%AA%E7%A2%BC%E7%B3%BB%E7%B5%B1.apk)
-            - [下載 AutoMosaic.apk](https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/AutoMosaic.apk)
-          - 完成設定 \`GDRIVE_SERVICE_ACCOUNT_JSON\` Secret 後，每次推送皆會自動覆寫雲端硬碟「自碼系統」資料夾。
+            - [下載 自碼系統 (AutoMosaic.apk)](https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/AutoMosaic.apk)
+          - 完成設定 \`GDRIVE_SERVICE_ACCOUNT_JSON\` Secret 後，每次推送皆會自動覆寫雲端硬碟「自碼系統」資料夾內的 \`自碼系統.apk\`。
           EOF
             exit 0
           fi
