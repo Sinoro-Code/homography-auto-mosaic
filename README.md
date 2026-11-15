@@ -88,9 +88,12 @@ homography-auto-mosaic/
 │               ├── CameraCaptureScreen.kt # CameraX YUV_420_888 擷取與即時防手震清晰度鎖定
 │               ├── PolygonLearnOverlay.kt # 手指塗抹/頂點框選 + 迭代式 Douglas-Peucker 頂點簡化 UI
 │               └── BatchGalleryScreen.kt  # Android Photo Picker 單張/批次 FD 直解直壓輸出
+├── .github/workflows/
+│   └── build-and-sync-apk.yml            # 推送即自動編譯 APK + 同步 Google 雲端硬碟 & GitHub Releases
 ├── scripts/
 │   ├── build_third_party_android.sh      # 一鍵交叉編譯 arm64-v8a / armeabi-v7a 靜態庫腳本
-│   └── sync_github_and_gdrive.py         # GitHub 原始碼推送 + Google 雲端硬碟「自碼系統.apk」單檔同步工具
+│   ├── ci_sync_gdrive.py                 # GitHub Actions 專用：透過永久服務帳戶原地覆寫雲端硬碟 APK
+│   └── sync_github_and_gdrive.py         # 本機手動輔助同步工具
 └── tests/
     └── test_native_pipeline.cpp          # 原生 C++20 完整管線自動化驗證套件
 ```
@@ -111,7 +114,7 @@ export ANDROID_NDK_HOME=/path/to/android-ndk-r27c
 完成後即可使用 Android Studio 開啟專案或透過 Gradle 建置已簽章之 `自碼系統.apk`（輸出於 `app/build/outputs/apk/release/自碼系統.apk`）：
 
 ```bash
-./gradlew :app:assembleRelease
+gradle :app:assembleRelease
 ```
 
 ### 5.2 在 Linux / macOS 主機端直接執行 C++20 原生管線驗證套件
@@ -129,12 +132,18 @@ cmake --build build-host-tests
 ./build-host-tests/test_native_pipeline
 ```
 
-### 5.3 雙軌自動同步規範（原始碼 -> GitHub ／ 打包產物 -> Google 雲端資料夾）
+### 5.3 GitHub Actions 全自動打包與 Google 雲端硬碟永久免重連同步
 
-本專案之任何修改遵循雙軌同步規範（詳見 `AGENTS.md`）：
-- **原始碼**一律推送至 GitHub（`origin/main`），不上傳至雲端硬碟。
-- **打包產物**（如 `自碼系統.apk`、`.aab` 等）一律透過以下工具冪等同步至 Google 雲端硬碟之 **`自碼系統`** 專屬資料夾（自動將既有檔案原地更新，不產生重複副本）：
+本專案已內建 `.github/workflows/build-and-sync-apk.yml`。每次推送原始碼至 `main` 分支時，GitHub 雲端即自動利用多層快取（NDK 靜態庫快取 + CMake `.cxx` 快取 + Gradle Build Cache）極速編譯最新 `自碼系統.apk`，並同時：
+1. **發佈至 GitHub Releases 固定下載網址**（手機可直接點擊下載）：
+   - 中文檔名：`https://github.com/Sinoro-Code/homography-auto-mosaic/releases/latest/download/%E8%87%AA%E7%A2%BC%E7%B3%BB%E7%B5%B1.apk`
+   - 英文別名：`https://github.com/Sinoro-Code/homography-auto-mosaic/releases/latest/download/AutoMosaic.apk`
+2. **原地覆寫至 Google 雲端硬碟「`自碼系統`」資料夾**（永久免重新登入、保留原檔案連結）：
 
-```bash
-./scripts/sync_github_and_gdrive.py --install-hook
-```
+#### 一次性 Google Cloud 服務帳戶設定步驟（設定一次，永久有效）
+1. 前往 [Google Cloud Console](https://console.cloud.google.com/) 建立或選取任一免費專案，於 **APIs & Services -> Library** 搜尋並啟用 **Google Drive API**。
+2. 前往 **IAM & Admin -> Service Accounts -> Create Service Account** 建立服務帳戶，複製其信箱（格式如 `xxx@yyy.iam.gserviceaccount.com`），並於該服務帳戶之 **Keys -> Add Key -> Create new key -> JSON** 下載金鑰檔。
+3. 開啟您的 Google 雲端硬碟「**自碼系統**」資料夾（`https://drive.google.com/drive/folders/1O96AN1YzkmXz1BgRmHBioR3FS4CRTmBr`，請確保資料夾內保留由您個人帳號擁有的 `自碼系統.apk`），點擊「**共用 (Share)**」，貼上剛剛的服務帳戶信箱並設為「**編輯者 (Editor)**」。
+4. 前往 GitHub 儲存庫 **Settings -> Secrets and variables -> Actions -> New repository secret**：
+   - Name 輸入：`GDRIVE_SERVICE_ACCOUNT_JSON`
+   - Secret 貼上：步驟 2 下載之完整 JSON 金鑰內容，按下 **Add secret** 即大功告成！

@@ -12,7 +12,7 @@ val customKeystoreFile = customKeystorePath?.let { File(it) }?.takeIf { it.isFil
 android {
     namespace = "com.antigravity.homographymosaic"
     compileSdk = 35
-    ndkVersion = "27.0.12077973"
+    ndkVersion = System.getenv("FAM_NDK_VERSION")?.takeIf { it.isNotBlank() } ?: "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.antigravity.homographymosaic"

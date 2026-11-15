@@ -1,0 +1,181 @@
+name: Build & Sync 自碼系統 APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-and-sync-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-sync:
+    name: 極速編譯簽章並同步雲端硬碟 & Releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Resolve Preinstalled Android SDK & NDK r27
+        id: android-env
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
+          SDKMANAGER="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+
+          # Prefer preinstalled NDK r27 on ubuntu-latest for 0-second startup
+          NDK_DIR=""
+          if [[ -d "${SDK_ROOT}/ndk" ]]; then
+            NDK_DIR="$(ls -1d "${SDK_ROOT}/ndk/27."* 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [[ -z "${NDK_DIR}" ]]; then
+            yes | "${SDKMANAGER}" --licenses >/dev/null || true
+            "${SDKMANAGER}" "ndk;27.0.12077973"
+            NDK_DIR="${SDK_ROOT}/ndk/27.0.12077973"
+          fi
+          NDK_VER="$(basename "${NDK_DIR}")"
+
+          MISSING_PKGS=()
+          [[ ! -d "${SDK_ROOT}/platforms/android-35" ]] && MISSING_PKGS+=("platforms;android-35")
+          [[ ! -d "${SDK_ROOT}/build-tools/35.0.0" ]] && MISSING_PKGS+=("build-tools;35.0.0")
+          [[ ! -d "${SDK_ROOT}/cmake/3.22.1" ]] && MISSING_PKGS+=("cmake;3.22.1")
+          if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
+            yes | "${SDKMANAGER}" --licenses >/dev/null || true
+            "${SDKMANAGER}" "${MISSING_PKGS[@]}"
+          fi
+
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "${GITHUB_ENV}"
+          echo "FAM_NDK_VERSION=${NDK_VER}" >> "${GITHUB_ENV}"
+          echo "Resolved NDK: ${NDK_DIR} (FAM_NDK_VERSION=${NDK_VER})"
+
+      - name: Cache Prebuilt NDK Static Third-Party (OpenCV 4.10 + libjpeg-turbo 3.0)
+        id: third-party-cache
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/cpp/third_party
+          key: android-ndk-third-party-v2-${{ hashFiles('scripts/build_third_party_android.sh') }}
+
+      - name: Cross-Compile Third-Party Static Libraries (Cold Run Only)
+        if: steps.third-party-cache.outputs.cache-hit != 'true'
+        run: |
+          chmod +x ./scripts/build_third_party_android.sh
+          ./scripts/build_third_party_android.sh
+
+      - name: Cache Native CMake/Ninja Incremental Objects (.cxx)
+        uses: actions/cache@v4
+        with:
+          path: app/.cxx
+          key: android-cxx-${{ env.FAM_NDK_VERSION }}-${{ hashFiles('app/src/main/cpp/CMakeLists.txt', 'app/src/main/cpp/include/**', 'app/src/main/cpp/src/**') }}
+          restore-keys: |
+            android-cxx-${{ env.FAM_NDK_VERSION }}-
+
+      - name: Setup Gradle 8.9 with Build Cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+          cache-read-only: false
+
+      - name: Prepare Release Signing Keystore
+        env:
+          FAM_KEYSTORE_BASE64: ${{ secrets.FAM_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -n "${FAM_KEYSTORE_BASE64}" ]]; then
+            KEYSTORE_FILE="${RUNNER_TEMP}/homography-mosaic-release.jks"
+            echo "${FAM_KEYSTORE_BASE64}" | tr -d ' \n\r' | base64 -d > "${KEYSTORE_FILE}"
+            echo "FAM_KEYSTORE_PATH=${KEYSTORE_FILE}" >> "${GITHUB_ENV}"
+            echo "Configured persistent release signing keystore."
+          else
+            echo "FAM_KEYSTORE_BASE64 not set; falling back to default signingConfig."
+          fi
+
+      - name: Assemble Signed Release APK (自碼系統.apk)
+        env:
+          FAM_KEYSTORE_PASS: ${{ secrets.FAM_KEYSTORE_PASS }}
+          FAM_KEY_ALIAS: ${{ secrets.FAM_KEY_ALIAS }}
+          FAM_KEY_PASS: ${{ secrets.FAM_KEY_PASS }}
+        run: |
+          gradle :app:assembleRelease --build-cache --no-daemon
+          cp -f "app/build/outputs/apk/release/自碼系統.apk" "app/build/outputs/apk/release/AutoMosaic.apk"
+          ls -lh app/build/outputs/apk/release/
+
+      - name: Publish to GitHub Releases (Fixed Latest Download URL)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK_CN="app/build/outputs/apk/release/自碼系統.apk"
+          APK_EN="app/build/outputs/apk/release/AutoMosaic.apk"
+          SHA256_VAL="$(sha256sum "${APK_CN}" | awk '{print $1}')"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BUILD_TIME="$(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S CST')"
+          COMMIT_MSG="$(git log -1 --pretty=%s)"
+
+          NOTES=$(cat <<EOF
+          ## 自碼系統 (Homography Auto-Mosaic) 自動建置發佈
+          - **來源 Commit**: \`${SHORT_SHA}\` — ${COMMIT_MSG}
+          - **建置時間**: ${BUILD_TIME}
+          - **支援架構**: \`arm64-v8a\` & \`armeabi-v7a\` (Android 7.0+ / Pure CPU NEON+POPCNT)
+          - **SHA-256**: \`${SHA256_VAL}\`
+
+          ### 手機固定直連下載網址
+          - **中文檔名**: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/%E8%87%AA%E7%A2%BC%E7%B3%BB%E7%B5%B1.apk
+          - **英文別名**: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/AutoMosaic.apk
+          EOF
+          )
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f latest "${GITHUB_SHA}"
+          git push origin refs/tags/latest --force
+
+          if gh release view latest --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit latest \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "自碼系統 最新自動打包版 (${SHORT_SHA})" \
+              --notes "${NOTES}" \
+              --latest
+            gh release upload latest "${APK_CN}" "${APK_EN}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create latest "${APK_CN}" "${APK_EN}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "自碼系統 最新自動打包版 (${SHORT_SHA})" \
+              --notes "${NOTES}" \
+              --latest
+          fi
+
+      - name: Sync 自碼系統.apk to Google Drive Folder (Service Account)
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GDRIVE_SERVICE_ACCOUNT_JSON}" ]]; then
+            echo "::notice title=Google Drive 待設定一次性金鑰::請於儲存庫 Settings -> Secrets -> Actions 新增 GDRIVE_SERVICE_ACCOUNT_JSON，並將雲端硬碟「自碼系統」資料夾共用（編輯者）給該服務帳戶信箱，即可啟用永久免重連自動覆寫。"
+            cat <<EOF >> "${GITHUB_STEP_SUMMARY}"
+          ### Google 雲端硬碟同步狀態：待設定一次性 \`GDRIVE_SERVICE_ACCOUNT_JSON\`
+          - 本次建置已成功發佈至 **GitHub Releases 固定網址**：
+            - [下載 自碼系統.apk](https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/%E8%87%AA%E7%A2%BC%E7%B3%BB%E7%B5%B1.apk)
+            - [下載 AutoMosaic.apk](https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/AutoMosaic.apk)
+          - 完成設定 \`GDRIVE_SERVICE_ACCOUNT_JSON\` Secret 後，每次推送皆會自動覆寫雲端硬碟「自碼系統」資料夾。
+          EOF
+            exit 0
+          fi
+
+          python3 -m pip install --quiet google-auth requests
+          python3 ./scripts/ci_sync_gdrive.py \
+            --artifact "app/build/outputs/apk/release/自碼系統.apk"
