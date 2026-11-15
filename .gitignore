@@ -1,0 +1,18 @@
+# Gradle & Android Studio
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.cxx/
+.externalNativeBuild/
+
+# Third-party cross-compile caches & prebuilt static archives
+.native-deps-build/
+app/src/main/cpp/third_party/opencv/*/
+app/src/main/cpp/third_party/libjpeg-turbo/*/
+
+# OS & temporary files
+.DS_Store
+*.swp
+*.tmp
