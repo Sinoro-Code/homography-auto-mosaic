@@ -131,15 +131,15 @@ def sync_via_gdrive_cli(
     )
     print(f"[GDrive] Target root folder: {drive_folder_name} (ID: {root_id})")
 
-    # 1. Collect all unique relative directories in parent-first order
-    rel_dirs = sorted(
-        {
-            str(Path(rel).parent)
-            for rel in tracked_files
-            if str(Path(rel).parent) not in ("", ".")
-        },
-        key=lambda p: (len(Path(p).parts), p),
-    )
+    # 1. Collect all unique relative ancestor directories in parent-first order
+    all_ancestors = set()
+    for rel in tracked_files:
+        for anc in Path(rel).parents:
+            anc_str = str(anc)
+            if anc_str not in ("", "."):
+                all_ancestors.add(anc_str)
+
+    rel_dirs = sorted(all_ancestors, key=lambda p: (len(Path(p).parts), p))
 
     dir_id_map: Dict[str, str] = {"": root_id, ".": root_id}
     children_cache: Dict[str, Dict[str, dict]] = {
