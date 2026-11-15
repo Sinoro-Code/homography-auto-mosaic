@@ -129,9 +129,11 @@ cmake --build build-host-tests
 ./build-host-tests/test_native_pipeline
 ```
 
-### 5.3 GitHub 原始碼與 Google 雲端硬碟 `自碼系統.apk` 同步機制
+### 5.3 雙軌自動同步規範（原始碼 -> GitHub ／ 打包產物 -> Google 雲端資料夾）
 
-執行以下指令可在推送原始碼至 GitHub 的同時，僅將編譯打包完成之 `自碼系統.apk` 單檔冪等更新（`update-in-place`，不將原始碼上傳至雲端硬碟）至 Google 雲端硬碟：
+本專案之任何修改遵循雙軌同步規範（詳見 `AGENTS.md`）：
+- **原始碼**一律推送至 GitHub（`origin/main`），不上傳至雲端硬碟。
+- **打包產物**（如 `自碼系統.apk`、`.aab` 等）一律透過以下工具冪等同步至 Google 雲端硬碟之 **`自碼系統`** 專屬資料夾（自動將既有檔案原地更新，不產生重複副本）：
 
 ```bash
 ./scripts/sync_github_and_gdrive.py --install-hook

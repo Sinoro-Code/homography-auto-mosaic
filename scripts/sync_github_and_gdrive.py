@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Dual-Sync Utility:
-  1. Pushes source code commits to GitHub (`origin/main`).
-  2. Synchronizes ONLY the packaged Android Release APK (`自碼系統.apk`) to
-     Google Drive (in-place update if `自碼系統.apk` already exists, preserving
-     file ID and sharing permissions; never uploads source code trees to Drive).
+Dual-Track Project Sync Utility:
+  1. Source Code -> Pushed exclusively to GitHub (`origin/main`).
+  2. Packaged Artifacts (`自碼系統.apk`, `*.aab`, etc.) -> Synced exclusively into
+     a dedicated Google Drive folder (`自碼系統` by default), updating existing
+     artifacts in-place (`gdrive mutate update`) and migrating any loose root
+     `自碼系統.apk` into the folder automatically.
 """
 
 from __future__ import annotations
@@ -17,11 +18,22 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-APK_NAME = "自碼系統.apk"
-APK_MIME = "application/vnd.android.package-archive"
+DEFAULT_DRIVE_FOLDER_NAME = "自碼系統"
+DEFAULT_APK_NAME = "自碼系統.apk"
+FOLDER_MIME = "application/vnd.google-apps.folder"
 ID_REGEX = re.compile(r"\(ID:\s*([A-Za-z0-9_-]+)\)")
+
+ARTIFACT_MIME_MAP = {
+    ".apk": "application/vnd.android.package-archive",
+    ".aab": "application/octet-stream",
+    ".idsig": "application/octet-stream",
+}
+
+
+def detect_artifact_mime(path: Path) -> str:
+    return ARTIFACT_MIME_MAP.get(path.suffix.lower(), "application/octet-stream")
 
 
 def run_cmd(cmd: List[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -34,98 +46,150 @@ def run_cmd(cmd: List[str], cwd: Path, check: bool = True) -> subprocess.Complet
     )
 
 
-def find_existing_apk_id(apk_name: str, parent_id: Optional[str], cwd: Path) -> Optional[str]:
+def extract_id_from_output(stdout: str) -> str:
+    match = ID_REGEX.search(stdout)
+    if not match:
+        raise RuntimeError(f"Unable to parse Drive ID from output: {stdout.strip()}")
+    return match.group(1)
+
+
+def is_folder_item(item: dict) -> bool:
+    return (
+        item.get("mimeType") == FOLDER_MIME
+        or str(item.get("type", "")).lower() == "folder"
+    )
+
+
+def resolve_or_create_drive_folder(
+    folder_name: str, explicit_folder_id: Optional[str], cwd: Path
+) -> str:
+    if explicit_folder_id:
+        return explicit_folder_id
+
     res = run_cmd(
-        ["gdrive", "readonly", "search", "--name-contains", "自碼系統", "--json"],
+        ["gdrive", "readonly", "search", "--name-exact", folder_name, "--type", "folder", "--json"],
         cwd=cwd,
     )
     items = json.loads(res.stdout.strip() or "[]") or []
     for item in items:
-        if item.get("name") != apk_name:
-            continue
-        if str(item.get("mimeType", "")) == "application/vnd.google-apps.folder":
-            continue
-        if parent_id:
-            parents = item.get("parents") or []
-            if parents and parent_id not in parents:
-                continue
-        return str(item["id"])
-    return None
+        if item.get("name") == folder_name and is_folder_item(item):
+            return str(item["id"])
+
+    mk = run_cmd(["gdrive", "mutate", "mkdir", folder_name], cwd=cwd)
+    return extract_id_from_output(mk.stdout)
 
 
-def sync_apk_to_gdrive(
+def list_folder_files(folder_id: str, cwd: Path) -> Dict[str, str]:
+    res = run_cmd(["gdrive", "readonly", "ls", folder_id, "--json"], cwd=cwd)
+    items = json.loads(res.stdout.strip() or "[]") or []
+    out: Dict[str, str] = {}
+    for item in items:
+        if not is_folder_item(item) and item.get("name") and item.get("id"):
+            out[str(item["name"])] = str(item["id"])
+    return out
+
+
+def migrate_loose_root_artifact_if_present(
+    artifact_name: str, target_folder_id: str, existing_in_folder: Dict[str, str], cwd: Path
+) -> None:
+    res = run_cmd(
+        ["gdrive", "readonly", "search", "--name-exact", artifact_name, "--parent-id", "root", "--json"],
+        cwd=cwd,
+    )
+    items = json.loads(res.stdout.strip() or "[]") or []
+    for item in items:
+        if is_folder_item(item) or item.get("name") != artifact_name:
+            continue
+        loose_id = str(item["id"])
+        if loose_id == target_folder_id:
+            continue
+        if artifact_name not in existing_in_folder:
+            run_cmd(["gdrive", "mutate", "mv", loose_id, target_folder_id], cwd=cwd)
+            existing_in_folder[artifact_name] = loose_id
+        else:
+            run_cmd(["gdrive", "mutate", "trash", loose_id], cwd=cwd)
+
+
+def collect_default_artifacts(repo_root: Path) -> List[Path]:
+    artifacts: List[Path] = []
+    release_apk = repo_root / "app" / "build" / "outputs" / "apk" / "release" / DEFAULT_APK_NAME
+    if release_apk.is_file():
+        artifacts.append(release_apk)
+
+    bundle_dir = repo_root / "app" / "build" / "outputs" / "bundle" / "release"
+    if bundle_dir.is_dir():
+        for aab in sorted(bundle_dir.glob("*.aab")):
+            artifacts.append(aab)
+
+    return artifacts
+
+
+def sync_artifacts_to_gdrive_folder(
     repo_root: Path,
-    apk_path: Path,
-    parent_folder_id: Optional[str] = None,
-) -> str:
-    if not apk_path.is_file():
-        raise FileNotFoundError(
-            f"APK file not found at {apk_path}. Build `:app:assembleRelease` first."
+    artifacts: List[Path],
+    folder_name: str,
+    explicit_folder_id: Optional[str] = None,
+) -> Tuple_Result:
+    folder_id = resolve_or_create_drive_folder(folder_name, explicit_folder_id, repo_root)
+    existing_files = list_folder_files(folder_id, repo_root)
+
+    synced_ids: Dict[str, str] = {}
+    for artifact in artifacts:
+        if not artifact.is_file():
+            continue
+        migrate_loose_root_artifact_if_present(
+            artifact.name, folder_id, existing_files, repo_root
         )
+        mime = detect_artifact_mime(artifact)
+        if artifact.name in existing_files:
+            file_id = existing_files[artifact.name]
+            run_cmd(
+                ["gdrive", "mutate", "update", file_id, str(artifact), "--mime-type", mime],
+                cwd=repo_root,
+            )
+            synced_ids[artifact.name] = file_id
+        else:
+            up = run_cmd(
+                [
+                    "gdrive",
+                    "mutate",
+                    "upload",
+                    str(artifact),
+                    "--parent",
+                    folder_id,
+                    "--mime-type",
+                    mime,
+                ],
+                cwd=repo_root,
+            )
+            synced_ids[artifact.name] = extract_id_from_output(up.stdout)
 
-    staged_dir = apk_path.parent
-    upload_target = apk_path
-    if apk_path.name != APK_NAME:
-        upload_target = staged_dir / APK_NAME
-        shutil.copy2(apk_path, upload_target)
-
-    existing_id = find_existing_apk_id(APK_NAME, parent_folder_id, repo_root)
-    if existing_id:
-        run_cmd(
-            [
-                "gdrive",
-                "mutate",
-                "update",
-                existing_id,
-                str(upload_target),
-                "--mime-type",
-                APK_MIME,
-            ],
-            cwd=repo_root,
-        )
-        return existing_id
-
-    cmd = [
-        "gdrive",
-        "mutate",
-        "upload",
-        str(upload_target),
-        "--mime-type",
-        APK_MIME,
-    ]
-    if parent_folder_id:
-        cmd.extend(["--parent", parent_folder_id])
-
-    up = run_cmd(cmd, cwd=repo_root)
-    match = ID_REGEX.search(up.stdout)
-    if match:
-        return match.group(1)
-
-    resolved = find_existing_apk_id(APK_NAME, parent_folder_id, repo_root)
-    if not resolved:
-        raise RuntimeError(f"Uploaded {APK_NAME}, but could not resolve Drive file ID.")
-    return resolved
+    return folder_id, synced_ids
 
 
-def install_pre_push_hook(repo_root: Path) -> Path:
+Tuple_Result = tuple[str, Dict[str, str]]
+
+
+def install_pre_push_hook(repo_root: Path, folder_name: str, folder_id: str) -> Path:
     hooks_dir = repo_root / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     hook_path = hooks_dir / "pre-push"
-    hook_script = """#!/usr/bin/env bash
+    id_flag = f' --drive-folder-id "{folder_id}"' if folder_id else ""
+    hook_script = f"""#!/usr/bin/env bash
 # Auto-generated by scripts/sync_github_and_gdrive.py
-# Syncs ONLY the built `自碼系統.apk` to Google Drive when `git push` runs.
+# Source code pushes to GitHub; packaged artifacts (APK/AAB) sync into the Google Drive folder `{folder_name}`.
 set -euo pipefail
 
-if [ "${FAM_SKIP_GDRIVE_HOOK:-0}" = "1" ]; then
+if [ "${{FAM_SKIP_GDRIVE_HOOK:-0}}" = "1" ]; then
     exit 0
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-APK_FILE="$REPO_ROOT/app/build/outputs/apk/release/自碼系統.apk"
+APK_FILE="$REPO_ROOT/app/build/outputs/apk/release/{DEFAULT_APK_NAME}"
 
-if [ -f "$APK_FILE" ] && (command -v gdrive >/dev/null 2>&1 || [ -n "${GDRIVE_RCLONE_DEST:-}" ]); then
-    echo "[pre-push] Syncing 自碼系統.apk to Google Drive..."
-    python3 "$REPO_ROOT/scripts/sync_github_and_gdrive.py" --skip-git-push --apk "$APK_FILE"
+if [ -f "$APK_FILE" ] && (command -v gdrive >/dev/null 2>&1 || [ -n "${{GDRIVE_RCLONE_DEST:-}}" ]); then
+    echo "[pre-push] Syncing packaged artifacts to Google Drive folder '{folder_name}'..."
+    python3 "$REPO_ROOT/scripts/sync_github_and_gdrive.py" --skip-git-push --drive-folder-name "{folder_name}"{id_flag}
 fi
 """
     hook_path.write_text(hook_script, encoding="utf-8")
@@ -135,29 +199,35 @@ fi
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Push source code to GitHub and sync ONLY `自碼系統.apk` to Google Drive."
+        description="Push source code to GitHub and sync packaged artifacts (APK/AAB) into a Google Drive folder."
     )
     parser.add_argument("--remote", default="origin", help="Git remote name (default: origin)")
     parser.add_argument("--branch", default="", help="Git branch to push (default: current HEAD)")
     parser.add_argument(
-        "--apk",
-        default="",
-        help="Path to built APK (defaults to app/build/outputs/apk/release/自碼系統.apk)",
+        "--artifact",
+        action="append",
+        default=[],
+        help="Explicit packaged artifact path(s) to sync (defaults to release 自碼系統.apk / *.aab)",
     )
     parser.add_argument(
-        "--parent-folder-id",
-        default=os.environ.get("FAM_GDRIVE_PARENT_ID", ""),
-        help="Optional Google Drive parent folder ID (defaults to Drive root)",
+        "--drive-folder-name",
+        default=os.environ.get("FAM_GDRIVE_FOLDER_NAME", DEFAULT_DRIVE_FOLDER_NAME),
+        help=f"Target Google Drive folder name for packaged artifacts (default: {DEFAULT_DRIVE_FOLDER_NAME})",
+    )
+    parser.add_argument(
+        "--drive-folder-id",
+        default=os.environ.get("FAM_GDRIVE_FOLDER_ID", ""),
+        help="Optional explicit Google Drive folder ID",
     )
     parser.add_argument(
         "--skip-git-push",
         action="store_true",
-        help="Only sync 自碼系統.apk to Google Drive without running git push",
+        help="Only sync packaged artifacts to the Google Drive folder without running git push",
     )
     parser.add_argument(
         "--install-hook",
         action="store_true",
-        help="Install .git/hooks/pre-push so `git push` syncs 自碼系統.apk to Google Drive",
+        help="Install .git/hooks/pre-push for automatic packaged-artifact sync",
     )
     args = parser.parse_args()
 
@@ -166,14 +236,16 @@ def main() -> int:
     )
 
     if args.install_hook:
-        hook_file = install_pre_push_hook(repo_root)
-        print(f"[Hook] Installed APK-only Google Drive pre-push hook at: {hook_file}")
+        hook_file = install_pre_push_hook(
+            repo_root, args.drive_folder_name, args.drive_folder_id
+        )
+        print(f"[Hook] Installed dual-track pre-push hook at: {hook_file}")
 
     if not args.skip_git_push:
         branch = args.branch or run_cmd(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root
         ).stdout.strip()
-        print(f"[GitHub] Pushing branch '{branch}' to remote '{args.remote}'...")
+        print(f"[GitHub] Pushing source code branch '{branch}' to '{args.remote}'...")
         env = os.environ.copy()
         env["FAM_SKIP_GDRIVE_HOOK"] = "1"
         subprocess.run(
@@ -182,39 +254,42 @@ def main() -> int:
             env=env,
             check=True,
         )
-        print("[GitHub] Push complete.")
+        print("[GitHub] Source code push complete.")
 
-    apk_path = (
-        Path(args.apk).resolve()
-        if args.apk
-        else (repo_root / "app" / "build" / "outputs" / "apk" / "release" / APK_NAME)
+    artifacts = (
+        [Path(p).resolve() for p in args.artifact]
+        if args.artifact
+        else collect_default_artifacts(repo_root)
     )
-
-    if not apk_path.is_file():
+    if not artifacts:
         print(
-            f"[GDrive] APK not found at {apk_path}; run `:app:assembleRelease` first.",
+            "[GDrive] No packaged artifacts found under app/build/outputs/; build `:app:assembleRelease` first.",
             file=sys.stderr,
         )
         return 1
 
     if shutil.which("gdrive"):
-        file_id = sync_apk_to_gdrive(
+        folder_id, synced = sync_artifacts_to_gdrive_folder(
             repo_root=repo_root,
-            apk_path=apk_path,
-            parent_folder_id=args.parent_folder_id or None,
+            artifacts=artifacts,
+            folder_name=args.drive_folder_name,
+            explicit_folder_id=args.drive_folder_id or None,
         )
-        url = f"https://drive.google.com/file/d/{file_id}/view"
-        size_mb = apk_path.stat().st_size / (1024.0 * 1024.0)
-        print(f"[GDrive] Synced {APK_NAME} ({size_mb:.2f} MB) -> {url} (ID: {file_id})")
+        folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+        print(f"[GDrive] Synced {len(synced)} packaged artifact(s) into folder '{args.drive_folder_name}' -> {folder_url}")
+        for name, fid in synced.items():
+            print(f"  - {name}: https://drive.google.com/file/d/{fid}/view")
         return 0
 
     rclone_dest = os.environ.get("GDRIVE_RCLONE_DEST", "")
     if rclone_dest and shutil.which("rclone"):
-        subprocess.run(
-            ["rclone", "copyto", str(apk_path), f"{rclone_dest.rstrip('/')}/{APK_NAME}"],
-            check=True,
-        )
-        print(f"[GDrive/rclone] Synced {APK_NAME} to {rclone_dest}")
+        target_dir = f"{rclone_dest.rstrip('/')}/{args.drive_folder_name}"
+        for art in artifacts:
+            subprocess.run(
+                ["rclone", "copyto", str(art), f"{target_dir}/{art.name}"],
+                check=True,
+            )
+        print(f"[GDrive/rclone] Synced {len(artifacts)} artifact(s) to {target_dir}")
         return 0
 
     print(
