@@ -90,7 +90,7 @@ homography-auto-mosaic/
 │               └── BatchGalleryScreen.kt  # Android Photo Picker 單張/批次 FD 直解直壓輸出
 ├── scripts/
 │   ├── build_third_party_android.sh      # 一鍵交叉編譯 arm64-v8a / armeabi-v7a 靜態庫腳本
-│   └── sync_github_and_gdrive.py         # GitHub + Google 雲端硬碟雙重冪等同步工具（支援 pre-push hook）
+│   └── sync_github_and_gdrive.py         # GitHub 原始碼推送 + Google 雲端硬碟「自碼系統.apk」單檔同步工具
 └── tests/
     └── test_native_pipeline.cpp          # 原生 C++20 完整管線自動化驗證套件
 ```
@@ -108,7 +108,7 @@ export ANDROID_NDK_HOME=/path/to/android-ndk-r27c
 ./scripts/build_third_party_android.sh
 ```
 
-完成後即可使用 Android Studio 開啟專案或透過 Gradle 建置 Release APK：
+完成後即可使用 Android Studio 開啟專案或透過 Gradle 建置已簽章之 `自碼系統.apk`（輸出於 `app/build/outputs/apk/release/自碼系統.apk`）：
 
 ```bash
 ./gradlew :app:assembleRelease
@@ -129,9 +129,9 @@ cmake --build build-host-tests
 ./build-host-tests/test_native_pipeline
 ```
 
-### 5.3 GitHub 與 Google 雲端硬碟同步機制 (`sync_github_and_gdrive.py`)
+### 5.3 GitHub 原始碼與 Google 雲端硬碟 `自碼系統.apk` 同步機制
 
-執行以下指令可在推送到 GitHub 的同時，將所有受 Git 追蹤之原始碼目錄結構與完整 `homography-auto-mosaic-source.zip` 壓縮包冪等更新（`update-in-place`，不重複建立同檔名副本）至 Google 雲端硬碟，並自動安裝 `.git/hooks/pre-push` 鉤子，確保往後每次執行 `git push` 皆自動同步至雲端硬碟：
+執行以下指令可在推送原始碼至 GitHub 的同時，僅將編譯打包完成之 `自碼系統.apk` 單檔冪等更新（`update-in-place`，不將原始碼上傳至雲端硬碟）至 Google 雲端硬碟：
 
 ```bash
 ./scripts/sync_github_and_gdrive.py --install-hook

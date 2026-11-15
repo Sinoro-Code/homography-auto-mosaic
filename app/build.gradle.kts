@@ -4,9 +4,15 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val customKeystorePath = System.getenv("FAM_KEYSTORE_PATH")
+    ?: File(System.getProperty("user.home"), ".gemini/homography-mosaic-release.jks")
+        .takeIf { it.isFile }?.absolutePath
+val customKeystoreFile = customKeystorePath?.let { File(it) }?.takeIf { it.isFile }
+
 android {
     namespace = "com.antigravity.homographymosaic"
     compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.antigravity.homographymosaic"
@@ -32,10 +38,29 @@ android {
         }
     }
 
+    signingConfigs {
+        if (customKeystoreFile != null) {
+            create("releaseCustom") {
+                storeFile = customKeystoreFile
+                storePassword = System.getenv("FAM_KEYSTORE_PASS") ?: "AutoMosaic2026!"
+                keyAlias = System.getenv("FAM_KEY_ALIAS") ?: "homographymosaic"
+                keyPassword = System.getenv("FAM_KEY_PASS") ?: "AutoMosaic2026!"
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = if (customKeystoreFile != null) {
+                signingConfigs.getByName("releaseCustom")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -74,6 +99,20 @@ android {
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+}
+
+afterEvaluate {
+    tasks.matching { it.name == "assembleRelease" }.configureEach {
+        doLast {
+            val releaseDir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
+            val builtApk = releaseDir.listFiles()
+                ?.firstOrNull { it.isFile && it.extension == "apk" && it.name != "自碼系統.apk" }
+            if (builtApk != null) {
+                val namedApk = File(releaseDir, "自碼系統.apk")
+                builtApk.copyTo(namedApk, overwrite = true)
+            }
         }
     }
 }

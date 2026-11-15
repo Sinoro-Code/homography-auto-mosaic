@@ -1,65 +1,27 @@
 #!/usr/bin/env python3
 """
-Dual-Sync Utility: Synchronizes the Git repository to GitHub AND mirrors all
-tracked source files + a clean HEAD zip archive to Google Drive idempotently.
-
-Supports:
-  1. Official `gdrive` CLI (`gdrive readonly` / `gdrive mutate` update-in-place)
-  2. `rclone` fallback (`GDRIVE_RCLONE_DEST`, e.g., `gdrive:homography-auto-mosaic`)
-  3. Optional Git `pre-push` hook installation (`--install-hook`) so every
-     `git push` automatically mirrors the repository to Google Drive.
+Dual-Sync Utility:
+  1. Pushes source code commits to GitHub (`origin/main`).
+  2. Synchronizes ONLY the packaged Android Release APK (`自碼系統.apk`) to
+     Google Drive (in-place update if `自碼系統.apk` already exists, preserving
+     file ID and sharing permissions; never uploads source code trees to Drive).
 """
 
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
-FOLDER_MIME = "application/vnd.google-apps.folder"
+APK_NAME = "自碼系統.apk"
+APK_MIME = "application/vnd.android.package-archive"
 ID_REGEX = re.compile(r"\(ID:\s*([A-Za-z0-9_-]+)\)")
-
-TEXT_PLAIN_SUFFIXES = {
-    ".kt",
-    ".kts",
-    ".cpp",
-    ".hpp",
-    ".c",
-    ".h",
-    ".cmake",
-    ".pro",
-    ".toml",
-    ".properties",
-    ".sh",
-    ".py",
-    ".txt",
-    ".gitignore",
-}
-
-
-def detect_mime_type(path: Path) -> str:
-    if path.name == ".gitignore" or path.name == "CMakeLists.txt":
-        return "text/plain"
-    ext = path.suffix.lower()
-    if ext == ".md":
-        return "text/markdown"
-    if ext == ".xml":
-        return "application/xml"
-    if ext == ".json":
-        return "application/json"
-    if ext == ".zip":
-        return "application/zip"
-    if ext in TEXT_PLAIN_SUFFIXES:
-        return "text/plain"
-    return "application/octet-stream"
 
 
 def run_cmd(cmd: List[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -72,216 +34,98 @@ def run_cmd(cmd: List[str], cwd: Path, check: bool = True) -> subprocess.Complet
     )
 
 
-def extract_id_from_output(stdout: str) -> str:
-    match = ID_REGEX.search(stdout)
-    if not match:
-        raise RuntimeError(f"Unable to parse Drive ID from output: {stdout.strip()}")
-    return match.group(1)
-
-
-def is_folder_item(item: dict) -> bool:
-    return (
-        item.get("mimeType") == FOLDER_MIME
-        or str(item.get("type", "")).lower() == "folder"
-    )
-
-
-def list_drive_children(folder_id: str, cwd: Path) -> Dict[str, dict]:
-    res = run_cmd(["gdrive", "readonly", "ls", folder_id, "--json"], cwd=cwd)
-    raw = res.stdout.strip()
-    items = json.loads(raw) if raw else []
-    if not items:
-        return {}
-    by_name: Dict[str, dict] = {}
-    for item in items:
-        name = item.get("name")
-        if name and name not in by_name:
-            by_name[name] = item
-    return by_name
-
-
-def resolve_or_create_root_drive_folder(
-    folder_name: str, explicit_id: Optional[str], cwd: Path
-) -> str:
-    if explicit_id:
-        return explicit_id
-
+def find_existing_apk_id(apk_name: str, parent_id: Optional[str], cwd: Path) -> Optional[str]:
     res = run_cmd(
-        ["gdrive", "readonly", "search", "--name-contains", folder_name, "--json"],
+        ["gdrive", "readonly", "search", "--name-contains", "自碼系統", "--json"],
         cwd=cwd,
     )
     items = json.loads(res.stdout.strip() or "[]") or []
     for item in items:
-        if item.get("name") == folder_name and is_folder_item(item):
-            return str(item["id"])
-
-    mk = run_cmd(["gdrive", "mutate", "mkdir", folder_name], cwd=cwd)
-    return extract_id_from_output(mk.stdout)
-
-
-def sync_via_gdrive_cli(
-    repo_root: Path,
-    tracked_files: List[str],
-    drive_folder_name: str,
-    explicit_folder_id: Optional[str],
-    workers: int,
-) -> Tuple[str, int, int]:
-    root_id = resolve_or_create_root_drive_folder(
-        drive_folder_name, explicit_folder_id, repo_root
-    )
-    print(f"[GDrive] Target root folder: {drive_folder_name} (ID: {root_id})")
-
-    # 1. Collect all unique relative ancestor directories in parent-first order
-    all_ancestors = set()
-    for rel in tracked_files:
-        for anc in Path(rel).parents:
-            anc_str = str(anc)
-            if anc_str not in ("", "."):
-                all_ancestors.add(anc_str)
-
-    rel_dirs = sorted(all_ancestors, key=lambda p: (len(Path(p).parts), p))
-
-    dir_id_map: Dict[str, str] = {"": root_id, ".": root_id}
-    children_cache: Dict[str, Dict[str, dict]] = {
-        root_id: list_drive_children(root_id, repo_root)
-    }
-
-    for rel_dir in rel_dirs:
-        parts = Path(rel_dir).parts
-        parent_rel = str(Path(*parts[:-1])) if len(parts) > 1 else ""
-        leaf_name = parts[-1]
-        parent_id = dir_id_map[parent_rel]
-
-        if parent_id not in children_cache:
-            children_cache[parent_id] = list_drive_children(parent_id, repo_root)
-
-        existing = children_cache[parent_id].get(leaf_name)
-        if existing and is_folder_item(existing):
-            sub_id = str(existing["id"])
-        else:
-            mk = run_cmd(
-                ["gdrive", "mutate", "mkdir", leaf_name, "--parent", parent_id],
-                cwd=repo_root,
-            )
-            sub_id = extract_id_from_output(mk.stdout)
-            children_cache[sub_id] = {}
-
-        dir_id_map[rel_dir] = sub_id
-        if sub_id not in children_cache:
-            children_cache[sub_id] = list_drive_children(sub_id, repo_root)
-
-    # 2. Build upload/update task list for all tracked files + clean HEAD zip snapshot
-    upload_tasks: List[Tuple[Path, str, Optional[str], str]] = []
-    for rel in tracked_files:
-        local_file = repo_root / rel
-        if not local_file.is_file():
+        if item.get("name") != apk_name:
             continue
-        parent_rel = str(Path(rel).parent)
-        if parent_rel == ".":
-            parent_rel = ""
-        parent_id = dir_id_map[parent_rel]
-        existing_entry = children_cache[parent_id].get(local_file.name)
-        existing_file_id = (
-            str(existing_entry["id"])
-            if (existing_entry and not is_folder_item(existing_entry))
-            else None
-        )
-        upload_tasks.append(
-            (local_file, parent_id, existing_file_id, detect_mime_type(local_file))
+        if str(item.get("mimeType", "")) == "application/vnd.google-apps.folder":
+            continue
+        if parent_id:
+            parents = item.get("parents") or []
+            if parents and parent_id not in parents:
+                continue
+        return str(item["id"])
+    return None
+
+
+def sync_apk_to_gdrive(
+    repo_root: Path,
+    apk_path: Path,
+    parent_folder_id: Optional[str] = None,
+) -> str:
+    if not apk_path.is_file():
+        raise FileNotFoundError(
+            f"APK file not found at {apk_path}. Build `:app:assembleRelease` first."
         )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        zip_name = f"{drive_folder_name}-source.zip"
-        zip_path = Path(tmpdir) / zip_name
+    staged_dir = apk_path.parent
+    upload_target = apk_path
+    if apk_path.name != APK_NAME:
+        upload_target = staged_dir / APK_NAME
+        shutil.copy2(apk_path, upload_target)
+
+    existing_id = find_existing_apk_id(APK_NAME, parent_folder_id, repo_root)
+    if existing_id:
         run_cmd(
             [
-                "git",
-                "archive",
-                "--format=zip",
-                f"--prefix={drive_folder_name}/",
-                "HEAD",
-                "-o",
-                str(zip_path),
+                "gdrive",
+                "mutate",
+                "update",
+                existing_id,
+                str(upload_target),
+                "--mime-type",
+                APK_MIME,
             ],
             cwd=repo_root,
         )
-        existing_zip = children_cache[root_id].get(zip_name)
-        existing_zip_id = (
-            str(existing_zip["id"])
-            if (existing_zip and not is_folder_item(existing_zip))
-            else None
-        )
-        upload_tasks.append((zip_path, root_id, existing_zip_id, "application/zip"))
+        return existing_id
 
-        created_count = 0
-        updated_count = 0
+    cmd = [
+        "gdrive",
+        "mutate",
+        "upload",
+        str(upload_target),
+        "--mime-type",
+        APK_MIME,
+    ]
+    if parent_folder_id:
+        cmd.extend(["--parent", parent_folder_id])
 
-        def _sync_one(
-            task: Tuple[Path, str, Optional[str], str]
-        ) -> Tuple[str, bool]:
-            src_path, parent_id, existing_id, mime = task
-            if existing_id:
-                run_cmd(
-                    [
-                        "gdrive",
-                        "mutate",
-                        "update",
-                        existing_id,
-                        str(src_path),
-                        "--mime-type",
-                        mime,
-                    ],
-                    cwd=repo_root,
-                )
-                return (src_path.name, False)
-            else:
-                run_cmd(
-                    [
-                        "gdrive",
-                        "mutate",
-                        "upload",
-                        str(src_path),
-                        "--parent",
-                        parent_id,
-                        "--mime-type",
-                        mime,
-                    ],
-                    cwd=repo_root,
-                )
-                return (src_path.name, True)
+    up = run_cmd(cmd, cwd=repo_root)
+    match = ID_REGEX.search(up.stdout)
+    if match:
+        return match.group(1)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_sync_one, t) for t in upload_tasks]
-            for fut in concurrent.futures.as_completed(futures):
-                _, is_created = fut.result()
-                if is_created:
-                    created_count += 1
-                else:
-                    updated_count += 1
-
-    return (root_id, created_count, updated_count)
+    resolved = find_existing_apk_id(APK_NAME, parent_folder_id, repo_root)
+    if not resolved:
+        raise RuntimeError(f"Uploaded {APK_NAME}, but could not resolve Drive file ID.")
+    return resolved
 
 
-def install_pre_push_hook(repo_root: Path, drive_folder_id: Optional[str]) -> Path:
+def install_pre_push_hook(repo_root: Path) -> Path:
     hooks_dir = repo_root / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     hook_path = hooks_dir / "pre-push"
-    folder_arg = f' --drive-folder-id "{drive_folder_id}"' if drive_folder_id else ""
-    hook_script = f"""#!/usr/bin/env bash
+    hook_script = """#!/usr/bin/env bash
 # Auto-generated by scripts/sync_github_and_gdrive.py
-# Automatically mirrors tracked repository files to Google Drive whenever `git push` runs.
+# Syncs ONLY the built `自碼系統.apk` to Google Drive when `git push` runs.
 set -euo pipefail
 
-if [ "${{FAM_SKIP_GDRIVE_HOOK:-0}}" = "1" ]; then
+if [ "${FAM_SKIP_GDRIVE_HOOK:-0}" = "1" ]; then
     exit 0
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-if command -v gdrive >/dev/null 2>&1 || [ -n "${{GDRIVE_RCLONE_DEST:-}}" ]; then
-    echo "[pre-push] Mirroring repository to Google Drive..."
-    python3 "$REPO_ROOT/scripts/sync_github_and_gdrive.py" --skip-git-push{folder_arg}
-else
-    echo "[pre-push] Skipping Google Drive mirror (neither 'gdrive' CLI nor GDRIVE_RCLONE_DEST configured)."
+APK_FILE="$REPO_ROOT/app/build/outputs/apk/release/自碼系統.apk"
+
+if [ -f "$APK_FILE" ] && (command -v gdrive >/dev/null 2>&1 || [ -n "${GDRIVE_RCLONE_DEST:-}" ]); then
+    echo "[pre-push] Syncing 自碼系統.apk to Google Drive..."
+    python3 "$REPO_ROOT/scripts/sync_github_and_gdrive.py" --skip-git-push --apk "$APK_FILE"
 fi
 """
     hook_path.write_text(hook_script, encoding="utf-8")
@@ -291,35 +135,29 @@ fi
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Synchronize repository to GitHub and Google Drive simultaneously."
+        description="Push source code to GitHub and sync ONLY `自碼系統.apk` to Google Drive."
     )
     parser.add_argument("--remote", default="origin", help="Git remote name (default: origin)")
     parser.add_argument("--branch", default="", help="Git branch to push (default: current HEAD)")
     parser.add_argument(
-        "--drive-folder-name",
-        default="homography-auto-mosaic",
-        help="Target folder name in Google Drive",
+        "--apk",
+        default="",
+        help="Path to built APK (defaults to app/build/outputs/apk/release/自碼系統.apk)",
     )
     parser.add_argument(
-        "--drive-folder-id",
-        default=os.environ.get("FAM_GDRIVE_FOLDER_ID", ""),
-        help="Explicit Google Drive folder ID (optional)",
+        "--parent-folder-id",
+        default=os.environ.get("FAM_GDRIVE_PARENT_ID", ""),
+        help="Optional Google Drive parent folder ID (defaults to Drive root)",
     )
     parser.add_argument(
         "--skip-git-push",
         action="store_true",
-        help="Only mirror tracked files to Google Drive without running git push",
+        help="Only sync 自碼系統.apk to Google Drive without running git push",
     )
     parser.add_argument(
         "--install-hook",
         action="store_true",
-        help="Install .git/hooks/pre-push so `git push` automatically syncs Google Drive",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=6,
-        help="Concurrent Drive upload workers (default: 6)",
+        help="Install .git/hooks/pre-push so `git push` syncs 自碼系統.apk to Google Drive",
     )
     args = parser.parse_args()
 
@@ -328,10 +166,8 @@ def main() -> int:
     )
 
     if args.install_hook:
-        hook_file = install_pre_push_hook(
-            repo_root, args.drive_folder_id or None
-        )
-        print(f"[Hook] Installed automatic dual-sync Git hook at: {hook_file}")
+        hook_file = install_pre_push_hook(repo_root)
+        print(f"[Hook] Installed APK-only Google Drive pre-push hook at: {hook_file}")
 
     if not args.skip_git_push:
         branch = args.branch or run_cmd(
@@ -348,40 +184,37 @@ def main() -> int:
         )
         print("[GitHub] Push complete.")
 
-    tracked = [
-        line.strip()
-        for line in run_cmd(["git", "ls-files"], cwd=repo_root).stdout.splitlines()
-        if line.strip()
-    ]
+    apk_path = (
+        Path(args.apk).resolve()
+        if args.apk
+        else (repo_root / "app" / "build" / "outputs" / "apk" / "release" / APK_NAME)
+    )
+
+    if not apk_path.is_file():
+        print(
+            f"[GDrive] APK not found at {apk_path}; run `:app:assembleRelease` first.",
+            file=sys.stderr,
+        )
+        return 1
 
     if shutil.which("gdrive"):
-        folder_id, created, updated = sync_via_gdrive_cli(
+        file_id = sync_apk_to_gdrive(
             repo_root=repo_root,
-            tracked_files=tracked,
-            drive_folder_name=args.drive_folder_name,
-            explicit_folder_id=args.drive_folder_id or None,
-            workers=max(1, args.workers),
+            apk_path=apk_path,
+            parent_folder_id=args.parent_folder_id or None,
         )
-        drive_url = f"https://drive.google.com/drive/folders/{folder_id}"
-        print(
-            f"[GDrive] Sync complete -> {drive_url} "
-            f"(created={created}, updated={updated}, total={created + updated})"
-        )
+        url = f"https://drive.google.com/file/d/{file_id}/view"
+        size_mb = apk_path.stat().st_size / (1024.0 * 1024.0)
+        print(f"[GDrive] Synced {APK_NAME} ({size_mb:.2f} MB) -> {url} (ID: {file_id})")
         return 0
 
     rclone_dest = os.environ.get("GDRIVE_RCLONE_DEST", "")
     if rclone_dest and shutil.which("rclone"):
-        print(f"[GDrive/rclone] Syncing tracked repository to {rclone_dest}...")
-        with tempfile.TemporaryDirectory() as stage_dir:
-            stage_path = Path(stage_dir)
-            for rel in tracked:
-                src = repo_root / rel
-                if src.is_file():
-                    dst = stage_path / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-            subprocess.run(["rclone", "sync", str(stage_path), rclone_dest], check=True)
-        print("[GDrive/rclone] Sync complete.")
+        subprocess.run(
+            ["rclone", "copyto", str(apk_path), f"{rclone_dest.rstrip('/')}/{APK_NAME}"],
+            check=True,
+        )
+        print(f"[GDrive/rclone] Synced {APK_NAME} to {rclone_dest}")
         return 0
 
     print(

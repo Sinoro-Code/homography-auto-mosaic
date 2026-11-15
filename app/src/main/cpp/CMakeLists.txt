@@ -151,7 +151,9 @@ if(ANDROID)
         "-Wl,--exclude-libs,ALL"
     )
     target_link_libraries(homography_mosaic PRIVATE
+        "-Wl,--start-group"
         ${OPENCV_STATIC_MODULES}
+        "-Wl,--end-group"
         turbojpeg_static
         ${ANDROID_LOG_LIB}
         ${ANDROID_Z_LIB}

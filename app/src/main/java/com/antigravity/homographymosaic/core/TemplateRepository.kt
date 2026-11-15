@@ -25,7 +25,7 @@ data class FamTemplateEntry(
 )
 
 /**
- * Manages the lifecycle of FAMTPL02 binary templates stored under filesDir/templates/*.famtpl.
+ * Manages the lifecycle of FAMTPL02 binary templates stored under `filesDir/templates/<id>.famtpl`.
  * Performs Sub-1ms cold-start memory-mapped (mmap) preloading without decoding reference images.
  */
 class TemplateRepository(
