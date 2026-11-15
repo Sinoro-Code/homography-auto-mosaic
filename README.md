@@ -89,7 +89,8 @@ homography-auto-mosaic/
 │               ├── PolygonLearnOverlay.kt # 手指塗抹/頂點框選 + 迭代式 Douglas-Peucker 頂點簡化 UI
 │               └── BatchGalleryScreen.kt  # Android Photo Picker 單張/批次 FD 直解直壓輸出
 ├── scripts/
-│   └── build_third_party_android.sh      # 一鍵交叉編譯 arm64-v8a / armeabi-v7a 靜態庫腳本
+│   ├── build_third_party_android.sh      # 一鍵交叉編譯 arm64-v8a / armeabi-v7a 靜態庫腳本
+│   └── sync_github_and_gdrive.py         # GitHub + Google 雲端硬碟雙重冪等同步工具（支援 pre-push hook）
 └── tests/
     └── test_native_pipeline.cpp          # 原生 C++20 完整管線自動化驗證套件
 ```
@@ -126,4 +127,12 @@ cmake -S app/src/main/cpp -B build-host-tests \
 
 cmake --build build-host-tests
 ./build-host-tests/test_native_pipeline
+```
+
+### 5.3 GitHub 與 Google 雲端硬碟同步機制 (`sync_github_and_gdrive.py`)
+
+執行以下指令可在推送到 GitHub 的同時，將所有受 Git 追蹤之原始碼目錄結構與完整 `homography-auto-mosaic-source.zip` 壓縮包冪等更新（`update-in-place`，不重複建立同檔名副本）至 Google 雲端硬碟，並自動安裝 `.git/hooks/pre-push` 鉤子，確保往後每次執行 `git push` 皆自動同步至雲端硬碟：
+
+```bash
+./scripts/sync_github_and_gdrive.py --install-hook
 ```
