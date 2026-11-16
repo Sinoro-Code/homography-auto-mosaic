@@ -96,6 +96,7 @@ if(ANDROID)
     endif()
     find_library(ANDROID_LOG_LIB log REQUIRED)
     find_library(ANDROID_Z_LIB z REQUIRED)
+    find_library(ANDROID_WINDOW_LIB android REQUIRED)
 else()
     # Host C++20 verification mode
     if(FAM_DEPS_PREFIX)
@@ -157,6 +158,7 @@ if(ANDROID)
         turbojpeg_static
         ${ANDROID_LOG_LIB}
         ${ANDROID_Z_LIB}
+        ${ANDROID_WINDOW_LIB}
         dl
         m
     )

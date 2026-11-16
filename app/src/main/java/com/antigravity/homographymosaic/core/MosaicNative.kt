@@ -1,6 +1,6 @@
 package com.antigravity.homographymosaic.core
 
-import androidx.camera.core.ImageProxy
+import android.view.Surface
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.util.concurrent.locks.ReentrantReadWriteLock
@@ -10,6 +10,15 @@ import kotlin.concurrent.write
 data class NormalizedPoint(
     val x: Float,
     val y: Float
+)
+
+data class JpegHeaderInfo(
+    val valid: Boolean,
+    val rawWidth: Int,
+    val rawHeight: Int,
+    val uprightWidth: Int,
+    val uprightHeight: Int,
+    val exifOrientation: Int
 )
 
 data class LearnTelemetry(
@@ -24,17 +33,6 @@ data class ColdLoadTelemetry(
     val activeTemplateCount: Int
 )
 
-data class CameraCaptureMosaicTelemetry(
-    val ioSuccess: Boolean,
-    val matchedAny: Boolean,
-    val templatesMatched: Int,
-    val bestInliers: Int,
-    val orbAndHomographyUs: Long,
-    val neonMosaicUs: Long,
-    val jpegEncodeUs: Long,
-    val totalUs: Long
-)
-
 data class GalleryJpegTelemetry(
     val ioSuccess: Boolean,
     val matchedAny: Boolean,
@@ -47,12 +45,13 @@ data class GalleryJpegTelemetry(
     val totalUs: Long,
     val peakBufferBytes: Long,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val fixedPositionApplied: Int
 )
 
 /**
  * Low-level JNI declarations bound to libhomography_mosaic.so (C++20 + ARM NEON + POPCNT).
- * Zero android.graphics.Bitmap imports or RGB conversions exist anywhere in this pipeline.
+ * Operates strictly in YUV420 planes and ANativeWindow hardware surfaces with zero Java RGB heap objects.
  */
 object MosaicNative {
     init {
@@ -60,7 +59,11 @@ object MosaicNative {
     }
 
     @JvmStatic
-    external fun nativeCreateEngine(blockSize: Int, noiseAmplitude: Int): Long
+    external fun nativeCreateEngine(
+        blockSize: Int,
+        noiseAmplitude: Int,
+        fallbackToFixedPosition: Boolean
+    ): Long
 
     @JvmStatic
     external fun nativeDestroyEngine(handle: Long)
@@ -71,16 +74,33 @@ object MosaicNative {
         blockSize: Int,
         noiseAmplitude: Int,
         loweRatio: Float,
-        minInliers: Int
+        minInliers: Int,
+        fallbackToFixedPosition: Boolean
     )
 
     @JvmStatic
-    external fun nativeComputeSharpness(
-        yBuffer: ByteBuffer,
-        width: Int,
-        height: Int,
-        yRowStride: Int
-    ): Float
+    external fun nativeInspectJpegFd(
+        inFd: Int,
+        outMeta: IntArray
+    ): Boolean
+
+    @JvmStatic
+    external fun nativeRenderJpegFdToSurface(
+        inFd: Int,
+        surface: Surface,
+        maxPreviewDim: Int
+    ): Boolean
+
+    @JvmStatic
+    external fun nativeLearnTemplateFromJpegFd(
+        handle: Long,
+        inFd: Int,
+        polygonCounts: IntArray,
+        flatUprightVertices: FloatArray,
+        outputTplPath: String,
+        templateId: String,
+        outStats: LongArray
+    ): Boolean
 
     @JvmStatic
     external fun nativeLearnTemplateFromYPlane(
@@ -133,25 +153,6 @@ object MosaicNative {
     ): Int
 
     @JvmStatic
-    external fun nativeProcessCameraYuvAndSaveJpegFd(
-        handle: Long,
-        yBuffer: ByteBuffer,
-        uBuffer: ByteBuffer,
-        vBuffer: ByteBuffer,
-        width: Int,
-        height: Int,
-        yRowStride: Int,
-        uRowStride: Int,
-        vRowStride: Int,
-        uvPixelStride: Int,
-        rotationDegrees: Int,
-        outFd: Int,
-        jpegQuality: Int,
-        blockSize: Int,
-        outStats: LongArray
-    ): Boolean
-
-    @JvmStatic
     external fun nativeProcessJpegFdToFd(
         handle: Long,
         inFd: Int,
@@ -162,41 +163,63 @@ object MosaicNative {
     ): Boolean
 
     /**
-     * Zero-allocation sharpness calculation directly on CameraX YUV_420_888 Plane[0].
+     * Zero-pixel header + EXIF orientation inspection directly from a ParcelFileDescriptor.
      */
-    fun computeSharpnessZeroCopy(image: ImageProxy): Float {
-        val planes = image.planes
-        if (planes.isEmpty()) return 0f
-        val yPlane = planes[0]
-        val yBuf = zeroCopyBaseBuffer(yPlane.buffer)
-        if (!yBuf.isDirect) return 0f
-        return nativeComputeSharpness(
-            yBuffer = yBuf,
-            width = image.width,
-            height = image.height,
-            yRowStride = yPlane.rowStride
-        )
+    fun inspectJpegFd(inFd: Int): JpegHeaderInfo {
+        if (inFd < 0) {
+            return JpegHeaderInfo(false, 0, 0, 0, 0, 1)
+        }
+        val meta = IntArray(5)
+        val ok = nativeInspectJpegFd(inFd, meta)
+        return if (ok) {
+            JpegHeaderInfo(
+                valid = true,
+                rawWidth = meta[0],
+                rawHeight = meta[1],
+                uprightWidth = meta[2],
+                uprightHeight = meta[3],
+                exifOrientation = meta[4]
+            )
+        } else {
+            JpegHeaderInfo(false, 0, 0, 0, 0, 1)
+        }
     }
 
-    internal fun zeroCopyBaseBuffer(buffer: ByteBuffer): ByteBuffer {
-        return if (buffer.position() == 0) buffer else buffer.slice()
+    /**
+     * Renders an EXIF-upright IDCT-downscaled preview directly into an ANativeWindow Surface.
+     */
+    fun renderJpegFdToSurface(
+        inFd: Int,
+        surface: Surface,
+        maxPreviewDim: Int = 1600
+    ): Boolean {
+        if (inFd < 0 || !surface.isValid) return false
+        return nativeRenderJpegFdToSurface(inFd, surface, maxPreviewDim)
     }
 }
 
 /**
  * Thread-safe RAII session managing a native C++20 MosaicEngine handle.
- * Uses ReentrantReadWriteLock so multi-core batch workers execute concurrently while
+ * Uses ReentrantReadWriteLock so batch workers execute concurrently while
  * lifecycle destruction and template mutations remain strictly serialized.
  */
 class MosaicEngineSession(
     initialBlockSize: Int = 16,
-    initialNoiseAmplitude: Int = 18
+    initialNoiseAmplitude: Int = 18,
+    initialFallbackToFixedPosition: Boolean = true
 ) : Closeable {
 
     private val rwLock = ReentrantReadWriteLock()
+    private var currentBlockSize: Int = initialBlockSize
+    private var currentNoiseAmplitude: Int = initialNoiseAmplitude
+    private var currentLoweRatio: Float = 0.78f
+    private var currentMinInliers: Int = 10
+    private var currentFallbackToFixedPosition: Boolean = initialFallbackToFixedPosition
+
     private var nativeHandle: Long = MosaicNative.nativeCreateEngine(
         blockSize = initialBlockSize,
-        noiseAmplitude = initialNoiseAmplitude
+        noiseAmplitude = initialNoiseAmplitude,
+        fallbackToFixedPosition = initialFallbackToFixedPosition
     )
 
     private val threadLocalStats = object : ThreadLocal<LongArray>() {
@@ -204,37 +227,44 @@ class MosaicEngineSession(
     }
 
     fun updateParameters(
-        blockSize: Int,
-        noiseAmplitude: Int = 18,
-        loweRatio: Float = 0.78f,
-        minInliers: Int = 10
+        blockSize: Int = currentBlockSize,
+        noiseAmplitude: Int = currentNoiseAmplitude,
+        loweRatio: Float = currentLoweRatio,
+        minInliers: Int = currentMinInliers,
+        fallbackToFixedPosition: Boolean = currentFallbackToFixedPosition
     ) = rwLock.write {
+        currentBlockSize = blockSize
+        currentNoiseAmplitude = noiseAmplitude
+        currentLoweRatio = loweRatio
+        currentMinInliers = minInliers
+        currentFallbackToFixedPosition = fallbackToFixedPosition
         if (nativeHandle != 0L) {
             MosaicNative.nativeUpdateConfig(
                 handle = nativeHandle,
-                blockSize = blockSize,
-                noiseAmplitude = noiseAmplitude,
-                loweRatio = loweRatio,
-                minInliers = minInliers
+                blockSize = currentBlockSize,
+                noiseAmplitude = currentNoiseAmplitude,
+                loweRatio = currentLoweRatio,
+                minInliers = currentMinInliers,
+                fallbackToFixedPosition = currentFallbackToFixedPosition
             )
         }
     }
 
-    fun learnTemplateFromImageProxy(
-        image: ImageProxy,
-        normalizedPolygons: List<List<NormalizedPoint>>,
+    /**
+     * Learns a FAMTPL02 binary template directly from a gallery JPEG file descriptor in YUV420 space,
+     * mapping upright [0..1] polygon coordinates into raw sensor coordinates via EXIF orientation.
+     */
+    fun learnTemplateFromJpegFd(
+        inFd: Int,
+        uprightPolygons: List<List<NormalizedPoint>>,
         outputTplPath: String,
         templateId: String
     ): LearnTelemetry = rwLock.write {
         check(nativeHandle != 0L) { "MosaicEngineSession already closed" }
-        val validPolys = normalizedPolygons.filter { it.size >= 3 }
-        if (validPolys.isEmpty() || image.planes.isEmpty()) {
+        val validPolys = uprightPolygons.filter { it.size >= 3 }
+        if (validPolys.isEmpty() || inFd < 0) {
             return@write LearnTelemetry(false, 0, 0L)
         }
-
-        val yPlane = image.planes[0]
-        val yBuf = MosaicNative.zeroCopyBaseBuffer(yPlane.buffer)
-        require(yBuf.isDirect) { "CameraX Y plane must be a DirectByteBuffer" }
 
         val polyCounts = IntArray(validPolys.size) { idx -> validPolys[idx].size }
         val totalVerts = validPolys.sumOf { it.size }
@@ -249,14 +279,11 @@ class MosaicEngineSession(
 
         val stats = threadLocalStats.get()!!
         stats.fill(0L)
-        val ok = MosaicNative.nativeLearnTemplateFromYPlane(
+        val ok = MosaicNative.nativeLearnTemplateFromJpegFd(
             handle = nativeHandle,
-            yBuffer = yBuf,
-            width = image.width,
-            height = image.height,
-            yRowStride = yPlane.rowStride,
+            inFd = inFd,
             polygonCounts = polyCounts,
-            flatNormalizedVertices = flatCoords,
+            flatUprightVertices = flatCoords,
             outputTplPath = outputTplPath,
             templateId = templateId,
             outStats = stats
@@ -300,57 +327,7 @@ class MosaicEngineSession(
     }
 
     /**
-     * Zero-copy CameraX YUV_420_888 in-place Homography Auto-Mosaic + direct JPEG FD output.
-     * Automatically handles vendor rowStride padding & I420 (stride=1) / NV12 / NV21 (stride=2).
-     */
-    fun processCameraYuvToJpegFd(
-        image: ImageProxy,
-        outFd: Int,
-        jpegQuality: Int = 92,
-        blockSize: Int = 16
-    ): CameraCaptureMosaicTelemetry = rwLock.read {
-        if (nativeHandle == 0L || image.planes.size < 3) {
-            return@read CameraCaptureMosaicTelemetry(false, false, 0, 0, 0L, 0L, 0L, 0L)
-        }
-
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-
-        val stats = threadLocalStats.get()!!
-        stats.fill(0L)
-        val ok = MosaicNative.nativeProcessCameraYuvAndSaveJpegFd(
-            handle = nativeHandle,
-            yBuffer = MosaicNative.zeroCopyBaseBuffer(yPlane.buffer),
-            uBuffer = MosaicNative.zeroCopyBaseBuffer(uPlane.buffer),
-            vBuffer = MosaicNative.zeroCopyBaseBuffer(vPlane.buffer),
-            width = image.width,
-            height = image.height,
-            yRowStride = yPlane.rowStride,
-            uRowStride = uPlane.rowStride,
-            vRowStride = vPlane.rowStride,
-            uvPixelStride = uPlane.pixelStride,
-            rotationDegrees = image.imageInfo.rotationDegrees,
-            outFd = outFd,
-            jpegQuality = jpegQuality,
-            blockSize = blockSize,
-            outStats = stats
-        )
-
-        CameraCaptureMosaicTelemetry(
-            ioSuccess = ok,
-            matchedAny = stats[0] == 1L,
-            templatesMatched = stats[1].toInt(),
-            bestInliers = stats[2].toInt(),
-            orbAndHomographyUs = stats[3],
-            neonMosaicUs = stats[4],
-            jpegEncodeUs = stats[5],
-            totalUs = stats[6]
-        )
-    }
-
-    /**
-     * Ultra-fast Gallery single/batch JPEG FD-to-FD pipeline (zero Bitmap / zero RGB).
+     * Ultra-fast Gallery single/batch JPEG FD-to-FD pipeline in YUV420 planes.
      */
     fun processGalleryJpegFdToFd(
         inFd: Int,
@@ -359,7 +336,9 @@ class MosaicEngineSession(
         blockSize: Int = 16
     ): GalleryJpegTelemetry = rwLock.read {
         if (nativeHandle == 0L) {
-            return@read GalleryJpegTelemetry(false, false, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0)
+            return@read GalleryJpegTelemetry(
+                false, false, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0, 0
+            )
         }
         val stats = threadLocalStats.get()!!
         stats.fill(0L)
@@ -384,7 +363,8 @@ class MosaicEngineSession(
             totalUs = stats[7],
             peakBufferBytes = stats[8],
             width = stats[9].toInt(),
-            height = stats[10].toInt()
+            height = stats[10].toInt(),
+            fixedPositionApplied = stats[11].toInt()
         )
     }
 

@@ -80,6 +80,7 @@ struct MosaicConfig {
     int32_t magsacMaxIters = 1500;     // USAC_MAGSAC iteration cap
     int32_t mosaicBlockSize = 16;      // Luma mosaic cell size (snapped to even >= 8)
     uint8_t noiseAmplitude = 18;       // Xorshift luma noise amplitude for anti-Depix protection
+    bool fallbackToFixedPosition = false; // Apply learned upright [0,1] position when Homography < minInliers
 };
 
 struct NormalizedPolygon {
@@ -103,6 +104,7 @@ struct MosaicProcessResult {
     bool matchedAny = false;
     uint32_t templatesEvaluated = 0;
     uint32_t templatesMatched = 0;
+    uint32_t fixedPositionApplied = 0;
     uint32_t targetKeypoints = 0;
     uint32_t bestMatchCount = 0;
     uint32_t bestInlierCount = 0;
@@ -130,8 +132,8 @@ public:
     [[nodiscard]] MosaicConfig getConfig() const;
 
     /**
-     * Computes a real-time Tenengrad/Laplacian sharpness score directly on a strided Y plane
-     * using ARM NEON SIMD (< 0.15 ms on 1080p) for CameraX anti-shake gating.
+     * Computes a Tenengrad/Laplacian sharpness score directly on a strided Y plane
+     * using ARM NEON SIMD (< 0.15 ms on 1080p).
      */
     [[nodiscard]] static float computeSharpnessScore(const YPlaneConstView& yView) noexcept;
 
@@ -143,13 +145,15 @@ public:
         const YPlaneConstView& yView,
         std::span<const NormalizedPolygon> polygons,
         const std::string& outputTplPath,
-        const std::string& registerTemplateId = "");
+        const std::string& registerTemplateId = "",
+        uint16_t refExifOrientation = 1);
 
     [[nodiscard]] LearnResult learnTemplateToBuffer(
         const YPlaneConstView& yView,
         std::span<const NormalizedPolygon> polygons,
         std::vector<uint8_t>& outFamTplBytes,
-        const std::string& registerTemplateId = "");
+        const std::string& registerTemplateId = "",
+        uint16_t refExifOrientation = 1);
 
     /**
      * Sub-1ms cold-start template loading via zero-copy mmap (FAMTPL02).
@@ -170,12 +174,14 @@ public:
 
     /**
      * Runs single-pass ORB extraction on target Y plane, matches against all active FAMTPL02
-     * templates via NEON hardware POPCNT, estimates projective homography via USAC_MAGSAC,
+     * templates via NEON hardware POPCNT, estimates projective homography via USAC_MAGSAC
+     * (with optional EXIF-aware fixed-position fallback when fallbackToFixedPosition is enabled),
      * projects polygon masks, and applies irreversible NEON + Xorshift mosaic IN-PLACE on YUV.
      */
     [[nodiscard]] MosaicProcessResult processYuvInPlace(
         const YuvPlaneView& frame,
-        int32_t overrideBlockSize = 0);
+        int32_t overrideBlockSize = 0,
+        uint16_t targetExifOrientation = 1);
 
     /**
      * Directly applies irreversible NEON + Xorshift mosaic in-place to explicit pixel-space

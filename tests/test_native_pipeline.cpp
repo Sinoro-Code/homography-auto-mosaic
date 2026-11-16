@@ -443,6 +443,94 @@ int main() {
         ::unlink(outJpegPath.c_str());
     }
 
+    // -------------------------------------------------------------------------
+    // 5. Gallery EXIF-6 FD Learn + Preview + Fixed-Position Fallback Verification
+    // -------------------------------------------------------------------------
+    {
+        // Create a featureless gradient/screenshot raw 1200x800 image with EXIF=6 (upright 800x1200)
+        cv::Mat rawRef(800, 1200, CV_8UC1);
+        for (int r = 0; r < rawRef.rows; ++r) {
+            uint8_t* row = rawRef.ptr<uint8_t>(r);
+            for (int c = 0; c < rawRef.cols; ++c) {
+                row[c] = static_cast<uint8_t>((r + c) % 200 + 30);
+            }
+        }
+        // Paint high-contrast stripes at upright [0.30, 0.40]..[0.70, 0.55] on a target EXIF-6 photo
+        // For EXIF 6: rx = uy, ry = 1 - ux
+        cv::Mat rawTarget(800, 1200, CV_8UC1, cv::Scalar(220));
+        for (int r = 0; r < rawTarget.rows; ++r) {
+            for (int c = 0; c < rawTarget.cols; ++c) {
+                const float rx = static_cast<float>(c) / 1200.0f;
+                const float ry = static_cast<float>(r) / 800.0f;
+                const auto up = fam::rawToUprightNormalized(rx, ry, 6);
+                if (up.normX >= 0.30f && up.normX <= 0.70f &&
+                    up.normY >= 0.40f && up.normY <= 0.55f) {
+                    rawTarget.at<uint8_t>(r, c) = ((c / 6) % 2 == 0) ? 15 : 245;
+                }
+            }
+        }
+
+        const std::string refExifPath = "/tmp/test_exif6_ref.jpg";
+        const std::string tgtExifPath = "/tmp/test_exif6_tgt.jpg";
+        const std::string outExifPath = "/tmp/test_exif6_out.jpg";
+        const std::string posTplPath = "/tmp/test_exif6_pos.famtpl";
+
+        fam::JpegYuvCodec codec;
+        {
+            PaddedNvBuffer refBuf = makeVendorPaddedYuv420(rawRef, TestUvMode::I420_PLANAR);
+            const int fd = ::open(refExifPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            FAM_REQUIRE(fd >= 0 && codec.encodeYuvViewToFd(refBuf.view, fd, 92, 6), "Save EXIF-6 ref failed");
+            ::close(fd);
+
+            PaddedNvBuffer tgtBuf = makeVendorPaddedYuv420(rawTarget, TestUvMode::I420_PLANAR);
+            const int tfd = ::open(tgtExifPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            FAM_REQUIRE(tfd >= 0 && codec.encodeYuvViewToFd(tgtBuf.view, tfd, 92, 6), "Save EXIF-6 tgt failed");
+            ::close(tfd);
+        }
+
+        const int inspectFd = ::open(refExifPath.c_str(), O_RDONLY);
+        const fam::JpegHeaderMeta hdrMeta = codec.inspectFd(inspectFd);
+        FAM_REQUIRE(hdrMeta.valid && hdrMeta.uprightWidth == 800 && hdrMeta.uprightHeight == 1200 &&
+                    hdrMeta.exifOrientation == 6,
+                    "inspectFd must report upright 800x1200 for EXIF-6 raw 1200x800");
+
+        std::vector<uint32_t> previewRgba;
+        int32_t prevW = 0, prevH = 0;
+        FAM_REQUIRE(codec.decodePreviewRgbaFromFd(inspectFd, 1600, previewRgba, prevW, prevH),
+                    "decodePreviewRgbaFromFd failed");
+        FAM_REQUIRE(prevW == 800 && prevH == 1200, "Preview must be rotated upright to 800x1200");
+
+        fam::MosaicConfig posCfg{};
+        posCfg.fallbackToFixedPosition = true;
+        fam::MosaicEngine posEngine(posCfg);
+
+        fam::NormalizedPolygon upBox;
+        upBox.vertices = {{0.30f, 0.40f}, {0.70f, 0.40f}, {0.70f, 0.55f}, {0.30f, 0.55f}};
+        const fam::LearnResult posLearn = codec.learnTemplateFromFd(
+            posEngine, inspectFd, std::span<const fam::NormalizedPolygon>(&upBox, 1),
+            posTplPath, "fixed_pos_exif6");
+        ::close(inspectFd);
+        FAM_REQUIRE(posLearn.success, "learnTemplateFromFd on featureless EXIF-6 screenshot failed");
+
+        const int tInFd = ::open(tgtExifPath.c_str(), O_RDONLY);
+        const int tOutFd = ::open(outExifPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        const fam::JpegBatchTelemetry posTel = codec.processFdToFd(posEngine, tInFd, tOutFd, 92, 16);
+        ::close(tInFd);
+        ::close(tOutFd);
+
+        std::printf("[Test 5 - EXIF-6 Gallery Position Learn & Auto-Mosaic] matched=%d, fixedApplied=%u, total=%.2fms\n",
+                    posTel.matchedAny ? 1 : 0,
+                    posTel.fixedPositionApplied,
+                    static_cast<double>(posTel.totalUs) / 1000.0);
+        FAM_REQUIRE(posTel.ioSuccess && posTel.matchedAny && posTel.fixedPositionApplied == 1,
+                    "Fixed-position fallback must mosaic unrelated EXIF-6 target photo");
+
+        ::unlink(refExifPath.c_str());
+        ::unlink(tgtExifPath.c_str());
+        ::unlink(outExifPath.c_str());
+        ::unlink(posTplPath.c_str());
+    }
+
     ::unlink(tplPath.c_str());
     std::printf("=== ALL C++20 NATIVE PIPELINE TESTS PASSED ===\n");
     return 0;

@@ -1,11 +1,9 @@
 package com.antigravity.homographymosaic.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Polyline
 import androidx.compose.material.icons.filled.Undo
@@ -30,7 +29,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -53,375 +53,457 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.antigravity.homographymosaic.core.NormalizedPoint
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 enum class PolygonInputMode {
-    FINGER_LASSO,   // 手指塗抹自由圈選 + 自動 Ramer-Douglas-Peucker 頂點簡化
-    TAP_VERTICES    // 精準多邊形頂點點擊框選
+    RECTANGLE_DRAG, // 矩形拖曳框選（最適合證件欄位、車牌、浮水印固定區域）
+    FINGER_LASSO,   // 手指塗抹自由圈選 + Ramer-Douglas-Peucker 頂點簡化
+    TAP_VERTICES    // 多邊形頂點精準點擊框選
 }
 
-/**
- * Holds view-space polygons (normalized to [0..1] of the overlay Canvas) prior to
- * sensor rotation/crop projection when a CameraX YUV_420_888 frame is captured.
- */
-data class OverlayPolygonState(
-    val viewNormalizedPolygons: List<List<NormalizedPoint>>,
-    val viewportWidthPx: Float,
-    val viewportHeightPx: Float
-)
+@Stable
+class PolygonEditorState {
+    var canvasSize by mutableStateOf(IntSize.Zero)
+    var inputMode by mutableStateOf(PolygonInputMode.RECTANGLE_DRAG)
+    var rdpEpsilonRatio by mutableFloatStateOf(0.015f)
 
-/**
- * Interactive Compose Canvas overlay for self-learning target regions without Bitmap allocation.
- * Features freehand finger brush/lasso, tap-to-place vertices, multi-region support, and
- * iterative Ramer-Douglas-Peucker (RDP) vertex simplification.
- */
-@Composable
-fun PolygonLearnOverlay(
-    modifier: Modifier = Modifier,
-    onPolygonsChanged: (OverlayPolygonState) -> Unit
-) {
-    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
-    var inputMode by remember { mutableStateOf(PolygonInputMode.FINGER_LASSO) }
-    var rdpEpsilonRatio by remember { mutableFloatStateOf(0.016f) }
+    // Completed polygons in upright [0..1] space (pair of points + whether RDP should simplify)
+    val rawPolygons = mutableStateListOf<Pair<List<NormalizedPoint>, Boolean>>()
 
-    // Completed raw view-normalized polygons (before or after RDP)
-    val rawPolygons = remember { mutableStateListOf<List<NormalizedPoint>>() }
-    // Active stroke or tap vertices currently being drawn
-    val activePoints = remember { mutableStateListOf<Offset>() }
+    // Active gesture points in canvas pixel coordinates
+    val activePoints = mutableStateListOf<Offset>()
+    var rectDragStart by mutableStateOf<Offset?>(null)
+    var rectDragEnd by mutableStateOf<Offset?>(null)
 
-    // Recompute RDP-simplified polygons whenever rawPolygons, activePoints, or epsilon changes
-    val simplifiedPolygons: List<List<NormalizedPoint>> = remember(
-        rawPolygons.toList(),
-        activePoints.toList(),
-        rdpEpsilonRatio,
-        inputMode,
-        canvasSize
-    ) {
+    val simplifiedPolygons: List<List<NormalizedPoint>> by derivedStateOf {
         val out = ArrayList<List<NormalizedPoint>>(rawPolygons.size + 1)
-        for (poly in rawPolygons) {
-            val simp = RdpSimplifier.simplifyClosedPolygon(poly, rdpEpsilonRatio)
+        for ((poly, needsRdp) in rawPolygons) {
+            val simp = if (needsRdp) {
+                RdpSimplifier.simplifyClosedPolygon(poly, rdpEpsilonRatio)
+            } else {
+                poly
+            }
             if (simp.size >= 3) out.add(simp)
         }
-        if (inputMode == PolygonInputMode.TAP_VERTICES && activePoints.size >= 3 &&
-            canvasSize.width > 0 && canvasSize.height > 0
+        if (inputMode == PolygonInputMode.TAP_VERTICES &&
+            activePoints.size >= 3 &&
+            canvasSize.width > 0 &&
+            canvasSize.height > 0
         ) {
-            val normTap = activePoints.map {
-                NormalizedPoint(
-                    (it.x / canvasSize.width.toFloat()).coerceIn(0f, 1f),
-                    (it.y / canvasSize.height.toFloat()).coerceIn(0f, 1f)
-                )
-            }
-            out.add(normTap)
+            val w = canvasSize.width.toFloat()
+            val h = canvasSize.height.toFloat()
+            out.add(
+                activePoints.map {
+                    NormalizedPoint(
+                        (it.x / w).coerceIn(0f, 1f),
+                        (it.y / h).coerceIn(0f, 1f)
+                    )
+                }
+            )
         }
         out
     }
 
-    LaunchedEffect(simplifiedPolygons, canvasSize) {
-        if (canvasSize.width > 0 && canvasSize.height > 0) {
-            onPolygonsChanged(
-                OverlayPolygonState(
-                    viewNormalizedPolygons = simplifiedPolygons,
-                    viewportWidthPx = canvasSize.width.toFloat(),
-                    viewportHeightPx = canvasSize.height.toFloat()
-                )
+    fun commitActiveTapPolygon() {
+        if (inputMode == PolygonInputMode.TAP_VERTICES &&
+            activePoints.size >= 3 &&
+            canvasSize.width > 0 &&
+            canvasSize.height > 0
+        ) {
+            val w = canvasSize.width.toFloat()
+            val h = canvasSize.height.toFloat()
+            rawPolygons.add(
+                activePoints.map {
+                    NormalizedPoint(
+                        (it.x / w).coerceIn(0f, 1f),
+                        (it.y / h).coerceIn(0f, 1f)
+                    )
+                } to false
             )
         }
+        activePoints.clear()
+        rectDragStart = null
+        rectDragEnd = null
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
-        Canvas(
-            modifier = Modifier
-                .fillMaxSize()
-                .onSizeChanged { canvasSize = it }
-                .pointerInput(inputMode, canvasSize) {
-                    if (inputMode == PolygonInputMode.FINGER_LASSO) {
-                        detectDragGestures(
-                            onDragStart = { start ->
-                                activePoints.clear()
-                                activePoints.add(start)
-                            },
-                            onDrag = { change, _ ->
-                                change.consume()
-                                val pos = change.position
-                                val last = activePoints.lastOrNull()
-                                if (last == null || hypot(pos.x - last.x, pos.y - last.y) >= 5f) {
-                                    activePoints.add(pos)
-                                }
-                            },
-                            onDragEnd = {
-                                if (activePoints.size >= 3 &&
-                                    canvasSize.width > 0 && canvasSize.height > 0
-                                ) {
-                                    val w = canvasSize.width.toFloat()
-                                    val h = canvasSize.height.toFloat()
-                                    val normalized = activePoints.map { pt ->
-                                        NormalizedPoint(
-                                            (pt.x / w).coerceIn(0f, 1f),
-                                            (pt.y / h).coerceIn(0f, 1f)
-                                        )
-                                    }
-                                    rawPolygons.add(normalized)
-                                }
-                                activePoints.clear()
-                            },
-                            onDragCancel = {
-                                activePoints.clear()
-                            }
-                        )
-                    } else {
-                        detectTapGestures { tapOffset ->
-                            activePoints.add(tapOffset)
-                        }
-                    }
-                }
-        ) {
-            val w = size.width
-            val h = size.height
+    fun switchMode(newMode: PolygonInputMode) {
+        if (newMode == inputMode) return
+        commitActiveTapPolygon()
+        inputMode = newMode
+    }
 
-            // Draw finalized / simplified polygons
-            for (poly in simplifiedPolygons) {
-                if (poly.size < 3) continue
-                val path = Path().apply {
-                    moveTo(poly[0].x * w, poly[0].y * h)
-                    for (i in 1 until poly.size) {
-                        lineTo(poly[i].x * w, poly[i].y * h)
-                    }
-                    close()
-                }
-                drawPath(
-                    path = path,
-                    color = Color(0x4400E5A3)
-                )
-                drawPath(
-                    path = path,
-                    color = Color(0xFF00E5A3),
-                    style = Stroke(
-                        width = 3.dp.toPx(),
-                        cap = StrokeCap.Round,
-                        join = StrokeJoin.Round
-                    )
-                )
-                for (v in poly) {
-                    drawCircle(
-                        color = Color(0xFF0B0F17),
-                        radius = 6.dp.toPx(),
-                        center = Offset(v.x * w, v.y * h)
-                    )
-                    drawCircle(
-                        color = Color(0xFF38BDF8),
-                        radius = 4.dp.toPx(),
-                        center = Offset(v.x * w, v.y * h)
-                    )
-                }
-            }
-
-            // Draw live finger lasso trail while dragging
-            if (inputMode == PolygonInputMode.FINGER_LASSO && activePoints.size >= 2) {
-                val livePath = Path().apply {
-                    moveTo(activePoints[0].x, activePoints[0].y)
-                    for (i in 1 until activePoints.size) {
-                        lineTo(activePoints[i].x, activePoints[i].y)
-                    }
-                    close()
-                }
-                drawPath(path = livePath, color = Color(0x3338BDF8))
-                drawPath(
-                    path = livePath,
-                    color = Color(0xFF38BDF8),
-                    style = Stroke(
-                        width = 2.5.dp.toPx(),
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
-                    )
-                )
-            } else if (inputMode == PolygonInputMode.TAP_VERTICES && activePoints.size in 1..2) {
-                for (pt in activePoints) {
-                    drawCircle(color = Color(0xFF38BDF8), radius = 6.dp.toPx(), center = pt)
-                }
-                if (activePoints.size == 2) {
-                    drawLine(
-                        color = Color(0xFF38BDF8),
-                        start = activePoints[0],
-                        end = activePoints[1],
-                        strokeWidth = 2.5.dp.toPx()
-                    )
-                }
-            }
-
-            // Subtle central alignment reticle for CameraX 60% sharpness ROI
-            val rx0 = w * 0.15f
-            val ry0 = h * 0.20f
-            drawRect(
-                color = Color(0x33FFFFFF),
-                topLeft = Offset(rx0, ry0),
-                size = Size(w * 0.70f, h * 0.55f),
-                style = Stroke(
-                    width = 1.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 12f), 0f)
-                )
-            )
+    fun undoLast() {
+        if (activePoints.isNotEmpty()) {
+            activePoints.removeAt(activePoints.lastIndex)
+        } else if (rawPolygons.isNotEmpty()) {
+            rawPolygons.removeAt(rawPolygons.lastIndex)
         }
+        rectDragStart = null
+        rectDragEnd = null
+    }
 
-        // Compact floating Douglas-Peucker & polygon control bar
-        Surface(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(horizontal = 12.dp, vertical = 10.dp)
-                .fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            color = Color(0xCC0B0F17)
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        AssistChip(
-                            onClick = {
-                                if (inputMode == PolygonInputMode.TAP_VERTICES &&
-                                    activePoints.size >= 3 &&
-                                    canvasSize.width > 0 && canvasSize.height > 0
-                                ) {
-                                    val w = canvasSize.width.toFloat()
-                                    val h = canvasSize.height.toFloat()
-                                    rawPolygons.add(
-                                        activePoints.map {
-                                            NormalizedPoint(
-                                                (it.x / w).coerceIn(0f, 1f),
-                                                (it.y / h).coerceIn(0f, 1f)
-                                            )
-                                        }
-                                    )
-                                }
-                                activePoints.clear()
-                                inputMode = PolygonInputMode.FINGER_LASSO
-                            },
-                            label = { Text("塗抹圈選") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Default.Brush,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            colors = AssistChipDefaults.assistChipColors(
-                                containerColor = if (inputMode == PolygonInputMode.FINGER_LASSO) {
-                                    Color(0xFF00E5A3).copy(alpha = 0.22f)
-                                } else {
-                                    Color.Transparent
-                                },
-                                labelColor = Color.White
-                            )
-                        )
+    fun clearAll() {
+        activePoints.clear()
+        rawPolygons.clear()
+        rectDragStart = null
+        rectDragEnd = null
+    }
+}
 
-                        AssistChip(
-                            onClick = {
-                                activePoints.clear()
-                                inputMode = PolygonInputMode.TAP_VERTICES
-                            },
-                            label = { Text("頂點框選") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Default.Polyline,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            colors = AssistChipDefaults.assistChipColors(
-                                containerColor = if (inputMode == PolygonInputMode.TAP_VERTICES) {
-                                    Color(0xFF38BDF8).copy(alpha = 0.25f)
-                                } else {
-                                    Color.Transparent
-                                },
-                                labelColor = Color.White
-                            )
-                        )
-                    }
+@Composable
+fun rememberPolygonEditorState(): PolygonEditorState {
+    return remember { PolygonEditorState() }
+}
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (inputMode == PolygonInputMode.TAP_VERTICES && activePoints.size >= 3) {
-                            IconButton(
-                                onClick = {
-                                    if (canvasSize.width > 0 && canvasSize.height > 0) {
-                                        val w = canvasSize.width.toFloat()
-                                        val h = canvasSize.height.toFloat()
-                                        rawPolygons.add(
-                                            activePoints.map {
-                                                NormalizedPoint(
-                                                    (it.x / w).coerceIn(0f, 1f),
-                                                    (it.y / h).coerceIn(0f, 1f)
-                                                )
-                                            }
-                                        )
-                                        activePoints.clear()
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    Icons.Default.Add,
-                                    contentDescription = "鎖定此多邊形並新增下一區",
-                                    tint = Color(0xFF00E5A3)
-                                )
-                            }
-                        }
+/**
+ * External toolbar placed cleanly above the aspect-fitted photo preview so no edge or corner
+ * of the reference photo is ever occluded while drawing mosaic regions.
+ */
+@Composable
+fun PolygonLearnToolbar(
+    state: PolygonEditorState,
+    modifier: Modifier = Modifier
+) {
+    val polygons = state.simplifiedPolygons
+    val totalVerts = polygons.sumOf { it.size }
 
-                        IconButton(
-                            onClick = {
-                                if (activePoints.isNotEmpty()) {
-                                    activePoints.removeAt(activePoints.lastIndex)
-                                } else if (rawPolygons.isNotEmpty()) {
-                                    rawPolygons.removeAt(rawPolygons.lastIndex)
-                                }
-                            }
-                        ) {
-                            Icon(Icons.Default.Undo, contentDescription = "復原", tint = Color.White)
-                        }
-
-                        IconButton(
-                            onClick = {
-                                activePoints.clear()
-                                rawPolygons.clear()
-                            }
-                        ) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFF131B2E)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AssistChip(
+                        onClick = { state.switchMode(PolygonInputMode.RECTANGLE_DRAG) },
+                        label = { Text("矩形框選") },
+                        leadingIcon = {
                             Icon(
-                                Icons.Default.DeleteSweep,
-                                contentDescription = "清除全部遮罩",
-                                tint = Color(0xFFF87171)
+                                Icons.Default.CropFree,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp)
                             )
-                        }
-                    }
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = if (state.inputMode == PolygonInputMode.RECTANGLE_DRAG) {
+                                Color(0xFF00E5A3).copy(alpha = 0.22f)
+                            } else {
+                                Color.Transparent
+                            },
+                            labelColor = Color.White
+                        )
+                    )
+
+                    AssistChip(
+                        onClick = { state.switchMode(PolygonInputMode.FINGER_LASSO) },
+                        label = { Text("塗抹圈選") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Brush,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = if (state.inputMode == PolygonInputMode.FINGER_LASSO) {
+                                Color(0xFF00E5A3).copy(alpha = 0.22f)
+                            } else {
+                                Color.Transparent
+                            },
+                            labelColor = Color.White
+                        )
+                    )
+
+                    AssistChip(
+                        onClick = { state.switchMode(PolygonInputMode.TAP_VERTICES) },
+                        label = { Text("多邊形") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Polyline,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = if (state.inputMode == PolygonInputMode.TAP_VERTICES) {
+                                Color(0xFF38BDF8).copy(alpha = 0.25f)
+                            } else {
+                                Color.Transparent
+                            },
+                            labelColor = Color.White
+                        )
+                    )
                 }
 
-                val totalVerts = simplifiedPolygons.sumOf { it.size }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (state.inputMode == PolygonInputMode.TAP_VERTICES && state.activePoints.size >= 3) {
+                        IconButton(onClick = { state.commitActiveTapPolygon() }) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = "鎖定此多邊形並新增下一區",
+                                tint = Color(0xFF00E5A3)
+                            )
+                        }
+                    }
+
+                    IconButton(onClick = { state.undoLast() }) {
+                        Icon(Icons.Default.Undo, contentDescription = "復原", tint = Color.White)
+                    }
+
+                    IconButton(onClick = { state.clearAll() }) {
+                        Icon(
+                            Icons.Default.DeleteSweep,
+                            contentDescription = "清除全部打碼區",
+                            tint = Color(0xFFF87171)
+                        )
+                    }
+                }
+            }
+
+            if (state.inputMode == PolygonInputMode.FINGER_LASSO) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "DP 簡化 ε=${"%.3f".format(rdpEpsilonRatio)} | 遮罩:${simplifiedPolygons.size} 頂點:$totalVerts",
+                        text = "DP 簡化 ε=${"%.3f".format(state.rdpEpsilonRatio)} | 區域:${polygons.size} 頂點:$totalVerts",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Medium,
                         color = Color(0xFFCBD5E1)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Slider(
-                        value = rdpEpsilonRatio,
-                        onValueChange = { rdpEpsilonRatio = it },
+                        value = state.rdpEpsilonRatio,
+                        onValueChange = { state.rdpEpsilonRatio = it },
                         valueRange = 0.004f..0.045f,
                         modifier = Modifier.weight(1f)
                     )
                 }
+            } else {
+                Text(
+                    text = "已設定打碼區域: ${polygons.size} 區（共 $totalVerts 頂點）· 可在同一張相片框選多處",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF94A3B8),
+                    modifier = Modifier.padding(top = 2.dp)
+                )
             }
         }
     }
 }
 
 /**
- * Iterative (zero-recursion) Ramer-Douglas-Peucker polygon simplifier + PreviewView
- * FILL_CENTER to raw CameraX YUV_420_888 coordinate projector.
+ * 1:1 aspect-matched interactive Canvas placed directly over the upright reference photo Surface.
+ * Coordinates map directly to upright [0..1] normalized image space.
+ */
+@Composable
+fun PolygonLearnCanvas(
+    state: PolygonEditorState,
+    modifier: Modifier = Modifier
+) {
+    val polygons = state.simplifiedPolygons
+
+    Canvas(
+        modifier = modifier
+            .fillMaxSize()
+            .onSizeChanged { state.canvasSize = it }
+            .pointerInput(state.inputMode, state.canvasSize) {
+                when (state.inputMode) {
+                    PolygonInputMode.RECTANGLE_DRAG -> {
+                        detectDragGestures(
+                            onDragStart = { start ->
+                                state.rectDragStart = start
+                                state.rectDragEnd = start
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                state.rectDragEnd = change.position
+                            },
+                            onDragEnd = {
+                                val s = state.rectDragStart
+                                val e = state.rectDragEnd
+                                val w = state.canvasSize.width.toFloat()
+                                val h = state.canvasSize.height.toFloat()
+                                if (s != null && e != null && w > 0f && h > 0f &&
+                                    abs(e.x - s.x) >= 8f && abs(e.y - s.y) >= 8f
+                                ) {
+                                    val x0 = (min(s.x, e.x) / w).coerceIn(0f, 1f)
+                                    val y0 = (min(s.y, e.y) / h).coerceIn(0f, 1f)
+                                    val x1 = (max(s.x, e.x) / w).coerceIn(0f, 1f)
+                                    val y1 = (max(s.y, e.y) / h).coerceIn(0f, 1f)
+                                    state.rawPolygons.add(
+                                        listOf(
+                                            NormalizedPoint(x0, y0),
+                                            NormalizedPoint(x1, y0),
+                                            NormalizedPoint(x1, y1),
+                                            NormalizedPoint(x0, y1)
+                                        ) to false
+                                    )
+                                }
+                                state.rectDragStart = null
+                                state.rectDragEnd = null
+                            },
+                            onDragCancel = {
+                                state.rectDragStart = null
+                                state.rectDragEnd = null
+                            }
+                        )
+                    }
+
+                    PolygonInputMode.FINGER_LASSO -> {
+                        detectDragGestures(
+                            onDragStart = { start ->
+                                state.activePoints.clear()
+                                state.activePoints.add(start)
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                val pos = change.position
+                                val last = state.activePoints.lastOrNull()
+                                if (last == null || hypot(pos.x - last.x, pos.y - last.y) >= 5f) {
+                                    state.activePoints.add(pos)
+                                }
+                            },
+                            onDragEnd = {
+                                val w = state.canvasSize.width.toFloat()
+                                val h = state.canvasSize.height.toFloat()
+                                if (state.activePoints.size >= 3 && w > 0f && h > 0f) {
+                                    val normalized = state.activePoints.map { pt ->
+                                        NormalizedPoint(
+                                            (pt.x / w).coerceIn(0f, 1f),
+                                            (pt.y / h).coerceIn(0f, 1f)
+                                        )
+                                    }
+                                    state.rawPolygons.add(normalized to true)
+                                }
+                                state.activePoints.clear()
+                            },
+                            onDragCancel = {
+                                state.activePoints.clear()
+                            }
+                        )
+                    }
+
+                    PolygonInputMode.TAP_VERTICES -> {
+                        detectTapGestures { tapOffset ->
+                            state.activePoints.add(tapOffset)
+                        }
+                    }
+                }
+            }
+    ) {
+        val w = size.width
+        val h = size.height
+
+        // Draw finalized / simplified mosaic regions
+        for (poly in polygons) {
+            if (poly.size < 3) continue
+            val path = Path().apply {
+                moveTo(poly[0].x * w, poly[0].y * h)
+                for (i in 1 until poly.size) {
+                    lineTo(poly[i].x * w, poly[i].y * h)
+                }
+                close()
+            }
+            drawPath(
+                path = path,
+                color = Color(0x4800E5A3)
+            )
+            drawPath(
+                path = path,
+                color = Color(0xFF00E5A3),
+                style = Stroke(
+                    width = 2.8.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round
+                )
+            )
+            for (v in poly) {
+                drawCircle(
+                    color = Color(0xFF0B0F17),
+                    radius = 5.5.dp.toPx(),
+                    center = Offset(v.x * w, v.y * h)
+                )
+                drawCircle(
+                    color = Color(0xFF38BDF8),
+                    radius = 3.8.dp.toPx(),
+                    center = Offset(v.x * w, v.y * h)
+                )
+            }
+        }
+
+        // Draw live rectangle drag preview
+        val rStart = state.rectDragStart
+        val rEnd = state.rectDragEnd
+        if (state.inputMode == PolygonInputMode.RECTANGLE_DRAG && rStart != null && rEnd != null) {
+            val left = min(rStart.x, rEnd.x).coerceIn(0f, w)
+            val top = min(rStart.y, rEnd.y).coerceIn(0f, h)
+            val right = max(rStart.x, rEnd.x).coerceIn(0f, w)
+            val bottom = max(rStart.y, rEnd.y).coerceIn(0f, h)
+            val rw = right - left
+            val rh = bottom - top
+            if (rw > 2f && rh > 2f) {
+                drawRect(
+                    color = Color(0x3838BDF8),
+                    topLeft = Offset(left, top),
+                    size = Size(rw, rh)
+                )
+                drawRect(
+                    color = Color(0xFF38BDF8),
+                    topLeft = Offset(left, top),
+                    size = Size(rw, rh),
+                    style = Stroke(
+                        width = 2.5.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
+                    )
+                )
+            }
+        }
+
+        // Draw live finger lasso trail while dragging
+        if (state.inputMode == PolygonInputMode.FINGER_LASSO && state.activePoints.size >= 2) {
+            val livePath = Path().apply {
+                moveTo(state.activePoints[0].x, state.activePoints[0].y)
+                for (i in 1 until state.activePoints.size) {
+                    lineTo(state.activePoints[i].x, state.activePoints[i].y)
+                }
+                close()
+            }
+            drawPath(path = livePath, color = Color(0x3338BDF8))
+            drawPath(
+                path = livePath,
+                color = Color(0xFF38BDF8),
+                style = Stroke(
+                    width = 2.5.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
+                )
+            )
+        } else if (state.inputMode == PolygonInputMode.TAP_VERTICES && state.activePoints.size in 1..2) {
+            for (pt in state.activePoints) {
+                drawCircle(color = Color(0xFF38BDF8), radius = 6.dp.toPx(), center = pt)
+            }
+            if (state.activePoints.size == 2) {
+                drawLine(
+                    color = Color(0xFF38BDF8),
+                    start = state.activePoints[0],
+                    end = state.activePoints[1],
+                    strokeWidth = 2.5.dp.toPx()
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Iterative (zero-recursion) Ramer-Douglas-Peucker closed polygon simplifier.
  */
 object RdpSimplifier {
 
@@ -431,7 +513,6 @@ object RdpSimplifier {
     ): List<NormalizedPoint> {
         if (points.size <= 4) return points
 
-        // Anchor split at the antipodal pair (0, farthestFrom0) so closed loops simplify cleanly
         var farIdx = 1
         var maxDistSq = -1f
         val p0 = points[0]
@@ -520,51 +601,7 @@ object RdpSimplifier {
         if (lenSq < 1e-10f) {
             return hypot(pt.x - lineStart.x, pt.y - lineStart.y)
         }
-        val num = kotlin.math.abs(dy * pt.x - dx * pt.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x)
+        val num = abs(dy * pt.x - dx * pt.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x)
         return num / sqrt(lenSq)
-    }
-
-    /**
-     * Maps view-normalized polygons drawn on a FILL_CENTER PreviewView into raw unrotated
-     * CameraX YUV_420_888 plane normalized [0, 1] coordinates without rotating pixels.
-     */
-    fun mapOverlayToRawSensorPolygons(
-        overlay: OverlayPolygonState,
-        rawSensorWidth: Int,
-        rawSensorHeight: Int,
-        rotationDegrees: Int
-    ): List<List<NormalizedPoint>> {
-        if (overlay.viewportWidthPx <= 0f || overlay.viewportHeightPx <= 0f ||
-            rawSensorWidth <= 0 || rawSensorHeight <= 0
-        ) {
-            return overlay.viewNormalizedPolygons
-        }
-
-        val rot = ((rotationDegrees % 360) + 360) % 360
-        val uprightW = if (rot == 90 || rot == 270) rawSensorHeight.toFloat() else rawSensorWidth.toFloat()
-        val uprightH = if (rot == 90 || rot == 270) rawSensorWidth.toFloat() else rawSensorHeight.toFloat()
-
-        // PreviewView FILL_CENTER center-crop inverse transform
-        val scale = max(overlay.viewportWidthPx / uprightW, overlay.viewportHeightPx / uprightH)
-        val scaledW = uprightW * scale
-        val scaledH = uprightH * scale
-        val cropOffsetX = (scaledW - overlay.viewportWidthPx) * 0.5f
-        val cropOffsetY = (scaledH - overlay.viewportHeightPx) * 0.5f
-
-        return overlay.viewNormalizedPolygons.map { poly ->
-            poly.map { v ->
-                val vxPx = v.x * overlay.viewportWidthPx
-                val vyPx = v.y * overlay.viewportHeightPx
-                val ux = ((vxPx + cropOffsetX) / scaledW).coerceIn(0f, 1f)
-                val uy = ((vyPx + cropOffsetY) / scaledH).coerceIn(0f, 1f)
-
-                when (rot) {
-                    90 -> NormalizedPoint(x = uy, y = (1f - ux).coerceIn(0f, 1f))
-                    180 -> NormalizedPoint(x = (1f - ux).coerceIn(0f, 1f), y = (1f - uy).coerceIn(0f, 1f))
-                    270 -> NormalizedPoint(x = (1f - uy).coerceIn(0f, 1f), y = ux)
-                    else -> NormalizedPoint(x = ux, y = uy)
-                }
-            }
-        }
     }
 }

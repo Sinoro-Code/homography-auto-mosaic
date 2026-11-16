@@ -18,8 +18,8 @@ android {
         applicationId = "com.antigravity.homographymosaic"
         minSdk = 24
         targetSdk = 35
-        versionCode = 200
-        versionName = "2.0.0-FAMTPL02"
+        versionCode = 210
+        versionName = "2.1.0-FAMTPL02"
 
         ndk {
             // Strict cross-vendor ARMv8 & ARMv7 NEON support
@@ -130,10 +130,4 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
-
-    // CameraX (YUV_420_888 zero-Bitmap pipeline)
-    implementation(libs.androidx.camera.core)
-    implementation(libs.androidx.camera.camera2)
-    implementation(libs.androidx.camera.lifecycle)
-    implementation(libs.androidx.camera.view)
 }

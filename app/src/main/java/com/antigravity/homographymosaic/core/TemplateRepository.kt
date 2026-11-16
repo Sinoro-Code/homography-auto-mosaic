@@ -1,7 +1,6 @@
 package com.antigravity.homographymosaic.core
 
 import android.content.Context
-import androidx.camera.core.ImageProxy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -76,26 +75,29 @@ class TemplateRepository(
     }
 
     /**
-     * Learns a new FAMTPL02 template directly from a CameraX YUV_420_888 frame's Y plane
-     * (zero Bitmap, zero RGB) and atomically persists both .famtpl and .meta.json.
+     * Learns a new FAMTPL02 template directly from a gallery JPEG file descriptor in YUV420 space
+     * and atomically persists both .famtpl and .meta.json.
      */
-    suspend fun learnAndSaveTemplate(
+    suspend fun learnAndSaveTemplateFromJpegFd(
         displayName: String,
-        image: ImageProxy,
-        normalizedPolygons: List<List<NormalizedPoint>>
-    ): Result<FamTemplateEntry> = withContext(Dispatchers.Default) {
-        val cleanPolys = normalizedPolygons.filter { it.size >= 3 }
+        inFd: Int,
+        uprightPolygons: List<List<NormalizedPoint>>,
+        makeExclusiveActive: Boolean = true
+    ): Result<FamTemplateEntry> = withContext(Dispatchers.IO) {
+        val cleanPolys = uprightPolygons.filter { it.size >= 3 }
         if (cleanPolys.isEmpty()) {
-            return@withContext Result.failure(IllegalArgumentException("請至少框選一個至少 3 頂點的多邊形遮罩區域"))
+            return@withContext Result.failure(
+                IllegalArgumentException("請先在相片上塗抹或點擊框選至少一個打碼位置（至少 3 個頂點）")
+            )
         }
 
         val id = "tpl_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
         val tplFile = File(templatesDir, "$id.famtpl")
         val metaFile = File(templatesDir, "$id.meta.json")
 
-        val tel = engineSession.learnTemplateFromImageProxy(
-            image = image,
-            normalizedPolygons = cleanPolys,
+        val tel = engineSession.learnTemplateFromJpegFd(
+            inFd = inFd,
+            uprightPolygons = cleanPolys,
             outputTplPath = tplFile.absolutePath,
             templateId = id
         )
@@ -103,14 +105,29 @@ class TemplateRepository(
         if (!tel.success || !tplFile.exists()) {
             tplFile.delete()
             return@withContext Result.failure(
-                IllegalStateException("特徵點不足（請對準具文字或邊角紋理之目標並保持防手震穩定）")
+                IllegalStateException("無法解析所選相片（請確認檔案為標準 JPEG 相片）")
             )
+        }
+
+        val updatedPrevious = if (makeExclusiveActive) {
+            _templates.value.map { existing ->
+                if (existing.enabled) {
+                    engineSession.unloadTemplate(existing.id)
+                    val disabled = existing.copy(enabled = false)
+                    writeMetadataAtomically(File(templatesDir, "${existing.id}.meta.json"), disabled)
+                    disabled
+                } else {
+                    existing
+                }
+            }
+        } else {
+            _templates.value
         }
 
         val nowMs = System.currentTimeMillis()
         val entry = FamTemplateEntry(
             id = id,
-            displayName = displayName.ifBlank { "自學習範本 #${_templates.value.size + 1}" },
+            displayName = displayName.ifBlank { "打碼位置 #${updatedPrevious.size + 1}" },
             famTplFilePath = tplFile.absolutePath,
             fileBytes = tplFile.length(),
             keypointCount = tel.extractedKeypoints,
@@ -122,7 +139,7 @@ class TemplateRepository(
         )
 
         writeMetadataAtomically(metaFile, entry)
-        _templates.value = listOf(entry) + _templates.value
+        _templates.value = listOf(entry) + updatedPrevious
         Result.success(entry)
     }
 

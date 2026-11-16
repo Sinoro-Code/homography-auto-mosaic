@@ -40,6 +40,16 @@ private:
     YuvPlaneView view_{};
 };
 
+struct JpegHeaderMeta {
+    bool valid = false;
+    int32_t rawWidth = 0;
+    int32_t rawHeight = 0;
+    int32_t uprightWidth = 0;
+    int32_t uprightHeight = 0;
+    uint16_t exifOrientation = 1;
+    std::string errorMessage;
+};
+
 struct JpegBatchTelemetry {
     bool ioSuccess = false;
     bool matchedAny = false;
@@ -47,6 +57,7 @@ struct JpegBatchTelemetry {
     int32_t height = 0;
     uint16_t exifOrientation = 1;
     uint32_t templatesMatched = 0;
+    uint32_t fixedPositionApplied = 0;
     uint32_t bestInliers = 0;
     uint64_t jpegDecodeUs = 0;
     uint64_t homographyAndOrbUs = 0;
@@ -70,6 +81,11 @@ public:
     JpegYuvCodec& operator=(const JpegYuvCodec&) = delete;
 
     /**
+     * Reads JPEG dimensions and EXIF Orientation (1..8) from an open FD without decoding pixels.
+     */
+    [[nodiscard]] JpegHeaderMeta inspectFd(int inFd);
+
+    /**
      * Decodes a JPEG memory buffer directly into 64-byte aligned YUV planes (zero RGB).
      * Also extracts the EXIF Orientation tag (1..8) if present so upright display is preserved
      * without rotating 12MP pixel buffers in CPU memory.
@@ -81,7 +97,33 @@ public:
         std::string* errorOut = nullptr);
 
     /**
-     * Compresses a YUV frame (supporting both planar I420/422/444 and CameraX semi-planar
+     * Learns a FAMTPL02 binary template directly from a Gallery JPEG FD in YUV420 space
+     * (zero Bitmap, zero RGB conversion in learning pipeline).
+     * Automatically maps user-drawn upright [0, 1] polygons into raw Y-plane coordinates
+     * using the source JPEG's EXIF Orientation (1..8).
+     */
+    [[nodiscard]] LearnResult learnTemplateFromFd(
+        MosaicEngine& engine,
+        int inFd,
+        std::span<const NormalizedPolygon> uprightPolygons,
+        const std::string& outputTplPath,
+        const std::string& registerTemplateId = "");
+
+    /**
+     * Hardware-SIMD IDCT scaled preview decoder for native ANativeWindow (SurfaceView) display.
+     * Decodes at 1/2, 1/4, or 1/8 DCT factor and applies EXIF Orientation (1..8) upright rotation
+     * using < 4 MB native transient buffer with zero Android Bitmap / Java heap allocation.
+     */
+    [[nodiscard]] bool decodePreviewRgbaFromFd(
+        int inFd,
+        int32_t maxPreviewDim,
+        std::vector<uint32_t>& outUprightRgba,
+        int32_t& outUprightWidth,
+        int32_t& outUprightHeight,
+        std::string* errorOut = nullptr);
+
+    /**
+     * Compresses a YUV frame (supporting both planar I420/422/444 and semi-planar
      * NV12/NV21 via NEON vld2q_u8 de-interleave) directly to JPEG using tjCompressFromYUVPlanes.
      * Injects a privacy-clean minimal EXIF APP1 Orientation segment when exifOrientation > 1.
      */
@@ -104,8 +146,8 @@ public:
 
     /**
      * Ultra-fast zero-Bitmap FD-to-FD pipeline for Android Photo Picker single/batch mode:
-     *   inFd -> pread -> tjDecompressToYUVPlanes -> Homography + NEON Mosaic ->
-     *   tjCompressFromYUVPlanes -> pwrite(outFd).
+     *   inFd -> mmap/pread -> tjDecompressToYUVPlanes -> Homography + NEON Mosaic ->
+     *   tjCompressFromYUVPlanes -> writev(outFd).
      * Reuses internal YUV arena + single compressed scratch buffer to stay < 25 MB peak RAM.
      */
     [[nodiscard]] JpegBatchTelemetry processFdToFd(
@@ -121,7 +163,7 @@ public:
     [[nodiscard]] static uint16_t parseExifOrientation(std::span<const uint8_t> jpegBytes) noexcept;
 
     /**
-     * Converts CameraX clockwise rotation degrees (0, 90, 180, 270) to EXIF Orientation code.
+     * Converts clockwise rotation degrees (0, 90, 180, 270) to EXIF Orientation code.
      */
     [[nodiscard]] static uint16_t rotationDegreesToExifOrientation(int32_t rotationDegrees) noexcept;
 
@@ -129,10 +171,10 @@ private:
     void* tjDecompressor_ = nullptr;
     void* tjCompressor_ = nullptr;
     AlignedYuvArena arena_;
-    unsigned char* tjOutBuf_ = nullptr;       // Reusable libjpeg-turbo compressed output buffer (~4 MB)
+    unsigned char* tjOutBuf_ = nullptr;       // Reusable libjpeg-turbo compressed output buffer (~3 MB)
     unsigned long tjOutCapacity_ = 0;
     std::vector<uint8_t> streamFallbackBuf_;  // Used only if input FD is a non-mmapable pipe/stream
-    std::vector<uint8_t> uvPlanarScratch_;    // Used only when encoding semi-planar NV12/NV21 CameraX frames
+    std::vector<uint8_t> uvPlanarScratch_;    // Used only when encoding semi-planar NV12/NV21 frames
 };
 
 } // namespace fam

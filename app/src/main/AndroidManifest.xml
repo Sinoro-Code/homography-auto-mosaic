@@ -1,16 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.CAMERA" />
-    <!-- Scoped MediaStore requires no storage permission on Android 10+ (API 29+);
+    <!-- Scoped MediaStore + Photo Picker require zero runtime permissions on Android 10+ (API 29+);
          maxSdkVersion=28 supports Android 7.0..9.0 (minSdk 24) gallery output. -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
-
-    <uses-feature
-        android:name="android.hardware.camera.any"
-        android:required="false" />
 
     <application
         android:allowBackup="false"

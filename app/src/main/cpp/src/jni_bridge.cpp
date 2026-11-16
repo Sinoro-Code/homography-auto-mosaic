@@ -6,6 +6,7 @@
 
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <android/native_window_jni.h>
 #define FAM_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "HomographyMosaicJNI", __VA_ARGS__)
 #define FAM_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "HomographyMosaicJNI", __VA_ARGS__)
 #else
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <string>
 #include <vector>
@@ -185,13 +187,15 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeCreateEngine(
     JNIEnv* /*env*/,
     jobject /*thiz*/,
     jint blockSize,
-    jint noiseAmplitude) {
+    jint noiseAmplitude,
+    jboolean fallbackToFixedPosition) {
 
     try {
         fam::MosaicConfig cfg{};
         cfg.mosaicBlockSize = std::clamp(static_cast<int32_t>(blockSize), 8, 64) & ~1;
         cfg.noiseAmplitude =
             static_cast<uint8_t>(std::clamp(static_cast<int32_t>(noiseAmplitude), 0, 64));
+        cfg.fallbackToFixedPosition = (fallbackToFixedPosition == JNI_TRUE);
         auto* ctx = new NativeEngineContext(cfg);
         return reinterpret_cast<jlong>(ctx);
     } catch (const std::exception& e) {
@@ -218,7 +222,8 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeUpdateConfig(
     jint blockSize,
     jint noiseAmplitude,
     jfloat loweRatio,
-    jint minInliers) {
+    jint minInliers,
+    jboolean fallbackToFixedPosition) {
 
     auto* ctx = reinterpret_cast<NativeEngineContext*>(handle);
     if (!ctx) {
@@ -231,32 +236,161 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeUpdateConfig(
             static_cast<uint8_t>(std::clamp(static_cast<int32_t>(noiseAmplitude), 0, 64));
         cfg.loweRatio = std::clamp(static_cast<float>(loweRatio), 0.55f, 0.92f);
         cfg.minInliers = std::clamp(static_cast<int32_t>(minInliers), 6, 100);
+        cfg.fallbackToFixedPosition = (fallbackToFixedPosition == JNI_TRUE);
         ctx->engine.updateConfig(cfg);
     } catch (const std::exception& e) {
         FAM_LOGE("nativeUpdateConfig exception: %s", e.what());
     }
 }
 
-JNIEXPORT jfloat JNICALL
-Java_com_antigravity_homographymosaic_core_MosaicNative_nativeComputeSharpness(
+JNIEXPORT jboolean JNICALL
+Java_com_antigravity_homographymosaic_core_MosaicNative_nativeInspectJpegFd(
     JNIEnv* env,
     jobject /*thiz*/,
-    jobject yBuffer,
-    jint width,
-    jint height,
-    jint yRowStride) {
+    jint inFd,
+    jintArray outMeta) {
 
-    if (!yBuffer) {
-        return 0.0f;
+    try {
+        if (inFd < 0 || !outMeta || env->GetArrayLength(outMeta) < 5) {
+            return JNI_FALSE;
+        }
+        const fam::JpegHeaderMeta meta = threadLocalCodec().inspectFd(inFd);
+        if (!meta.valid) {
+            FAM_LOGE("nativeInspectJpegFd failed: %s", meta.errorMessage.c_str());
+            return JNI_FALSE;
+        }
+        const jint vals[5] = {
+            meta.rawWidth,
+            meta.rawHeight,
+            meta.uprightWidth,
+            meta.uprightHeight,
+            static_cast<jint>(meta.exifOrientation)
+        };
+        env->SetIntArrayRegion(outMeta, 0, 5, vals);
+        return JNI_TRUE;
+    } catch (const std::exception& e) {
+        FAM_LOGE("nativeInspectJpegFd exception: %s", e.what());
+        return JNI_FALSE;
     }
-    const auto* yPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(yBuffer));
-    const jlong yCap = env->GetDirectBufferCapacity(yBuffer);
-    if (!yPtr || !validateYPlaneCapacity(yCap, width, height, yRowStride)) {
-        return 0.0f;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_antigravity_homographymosaic_core_MosaicNative_nativeRenderJpegFdToSurface(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jint inFd,
+    jobject surface,
+    jint maxPreviewDim) {
+
+#if defined(__ANDROID__)
+    if (inFd < 0 || !surface) {
+        return JNI_FALSE;
+    }
+    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    if (!window) {
+        return JNI_FALSE;
     }
 
-    const fam::YPlaneConstView yView{yPtr, width, height, yRowStride};
-    return fam::MosaicEngine::computeSharpnessScore(yView);
+    try {
+        std::vector<uint32_t> uprightRgba;
+        int32_t upW = 0;
+        int32_t upH = 0;
+        std::string err;
+        if (!threadLocalCodec().decodePreviewRgbaFromFd(
+                inFd, maxPreviewDim, uprightRgba, upW, upH, &err)) {
+            FAM_LOGE("nativeRenderJpegFdToSurface decode failed: %s", err.c_str());
+            ANativeWindow_release(window);
+            return JNI_FALSE;
+        }
+
+        if (ANativeWindow_setBuffersGeometry(window, upW, upH, WINDOW_FORMAT_RGBA_8888) != 0) {
+            FAM_LOGE("ANativeWindow_setBuffersGeometry(%dx%d) failed", upW, upH);
+            ANativeWindow_release(window);
+            return JNI_FALSE;
+        }
+
+        ANativeWindow_Buffer buf{};
+        if (ANativeWindow_lock(window, &buf, nullptr) != 0 || !buf.bits) {
+            FAM_LOGE("ANativeWindow_lock failed");
+            ANativeWindow_release(window);
+            return JNI_FALSE;
+        }
+
+        const int32_t copyW = std::min(upW, buf.width);
+        const int32_t copyH = std::min(upH, buf.height);
+        auto* dstBase = static_cast<uint32_t*>(buf.bits);
+
+        for (int32_t y = 0; y < copyH; ++y) {
+            std::memcpy(
+                dstBase + static_cast<size_t>(y) * static_cast<size_t>(buf.stride),
+                uprightRgba.data() + static_cast<size_t>(y) * static_cast<size_t>(upW),
+                static_cast<size_t>(copyW) * sizeof(uint32_t));
+        }
+
+        ANativeWindow_unlockAndPost(window);
+        ANativeWindow_release(window);
+        return JNI_TRUE;
+    } catch (const std::exception& e) {
+        FAM_LOGE("nativeRenderJpegFdToSurface exception: %s", e.what());
+        ANativeWindow_release(window);
+        return JNI_FALSE;
+    }
+#else
+    (void)env;
+    (void)inFd;
+    (void)surface;
+    (void)maxPreviewDim;
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_antigravity_homographymosaic_core_MosaicNative_nativeLearnTemplateFromJpegFd(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jlong handle,
+    jint inFd,
+    jintArray polygonCounts,
+    jfloatArray flatUprightVertices,
+    jstring outputTplPath,
+    jstring templateId,
+    jlongArray outStats) {
+
+    try {
+        auto* ctx = reinterpret_cast<NativeEngineContext*>(handle);
+        if (!ctx || inFd < 0) {
+            return JNI_FALSE;
+        }
+
+        std::vector<fam::NormalizedPolygon> uprightPolygons;
+        if (!unpackJniPolygons(env, polygonCounts, flatUprightVertices, uprightPolygons)) {
+            FAM_LOGE("nativeLearnTemplateFromJpegFd: invalid polygon vertices");
+            return JNI_FALSE;
+        }
+
+        const std::string outPath = jstringToStdString(env, outputTplPath);
+        const std::string tplId = jstringToStdString(env, templateId);
+        if (outPath.empty()) {
+            return JNI_FALSE;
+        }
+
+        const fam::LearnResult res = threadLocalCodec().learnTemplateFromFd(
+            ctx->engine, inFd, uprightPolygons, outPath, tplId);
+
+        writeStatsArray(env, outStats, {
+            static_cast<jlong>(res.extractedKeypoints),
+            static_cast<jlong>(res.elapsedUs)
+        });
+
+        if (!res.success) {
+            FAM_LOGE("learnTemplateFromFd failed: %s", res.errorMessage.c_str());
+            return JNI_FALSE;
+        }
+        return JNI_TRUE;
+    } catch (const std::exception& e) {
+        FAM_LOGE("nativeLearnTemplateFromJpegFd exception: %s", e.what());
+        return JNI_FALSE;
+    }
 }
 
 JNIEXPORT jboolean JNICALL
@@ -442,74 +576,6 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeProcessYuvInPlace(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_antigravity_homographymosaic_core_MosaicNative_nativeProcessCameraYuvAndSaveJpegFd(
-    JNIEnv* env,
-    jobject /*thiz*/,
-    jlong handle,
-    jobject yBuffer,
-    jobject uBuffer,
-    jobject vBuffer,
-    jint width,
-    jint height,
-    jint yRowStride,
-    jint uRowStride,
-    jint vRowStride,
-    jint uvPixelStride,
-    jint rotationDegrees,
-    jint outFd,
-    jint jpegQuality,
-    jint blockSize,
-    jlongArray outStats) {
-
-    try {
-        const auto tStart = SteadyClock::now();
-        auto* ctx = reinterpret_cast<NativeEngineContext*>(handle);
-        if (!ctx || outFd < 0) {
-            return JNI_FALSE;
-        }
-
-        fam::YuvPlaneView view{};
-        if (!validateYuv420DirectBuffers(
-                env, yBuffer, uBuffer, vBuffer,
-                width, height, yRowStride, uRowStride, vRowStride, uvPixelStride, view)) {
-            FAM_LOGE("nativeProcessCameraYuvAndSaveJpegFd: invalid YUV_420_888 DirectByteBuffers");
-            return JNI_FALSE;
-        }
-
-        const fam::MosaicProcessResult proc = ctx->engine.processYuvInPlace(view, blockSize);
-
-        const auto tEncStart = SteadyClock::now();
-        const uint16_t exifOrient =
-            fam::JpegYuvCodec::rotationDegreesToExifOrientation(rotationDegrees);
-        std::string err;
-        if (!threadLocalCodec().encodeYuvViewToFd(view, outFd, jpegQuality, exifOrient, &err)) {
-            FAM_LOGE("encodeYuvViewToFd failed: %s", err.c_str());
-            return JNI_FALSE;
-        }
-        const auto encUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                               SteadyClock::now() - tEncStart)
-                               .count();
-        const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 SteadyClock::now() - tStart)
-                                 .count();
-
-        writeStatsArray(env, outStats, {
-            proc.matchedAny ? 1LL : 0LL,
-            static_cast<jlong>(proc.templatesMatched),
-            static_cast<jlong>(proc.bestInlierCount),
-            static_cast<jlong>(proc.downsampleAndOrbUs + proc.matchAndMagsacUs),
-            static_cast<jlong>(proc.neonMosaicUs),
-            static_cast<jlong>(encUs),
-            static_cast<jlong>(totalUs)
-        });
-        return JNI_TRUE;
-    } catch (const std::exception& e) {
-        FAM_LOGE("nativeProcessCameraYuvAndSaveJpegFd exception: %s", e.what());
-        return JNI_FALSE;
-    }
-}
-
-JNIEXPORT jboolean JNICALL
 Java_com_antigravity_homographymosaic_core_MosaicNative_nativeProcessJpegFdToFd(
     JNIEnv* env,
     jobject /*thiz*/,
@@ -540,7 +606,8 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeProcessJpegFdToFd(
             static_cast<jlong>(tel.totalUs),
             static_cast<jlong>(tel.peakBufferBytes),
             static_cast<jlong>(tel.width),
-            static_cast<jlong>(tel.height)
+            static_cast<jlong>(tel.height),
+            static_cast<jlong>(tel.fixedPositionApplied)
         });
 
         if (!tel.ioSuccess) {

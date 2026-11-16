@@ -684,6 +684,291 @@ bool JpegYuvCodec::encodeYuvViewToFd(
     return true;
 }
 
+JpegHeaderMeta JpegYuvCodec::inspectFd(int inFd) {
+    JpegHeaderMeta meta{};
+    if (!tjDecompressor_ || inFd < 0) {
+        meta.errorMessage = "Invalid TurboJPEG handle or input FD";
+        return meta;
+    }
+
+    struct stat st{};
+    void* mappedIn = MAP_FAILED;
+    size_t inputBytes = 0;
+    const uint8_t* inputPtr = nullptr;
+
+    if (::fstat(inFd, &st) == 0 && st.st_size >= 4) {
+        inputBytes = static_cast<size_t>(st.st_size);
+        mappedIn = ::mmap(nullptr, inputBytes, PROT_READ, MAP_PRIVATE, inFd, 0);
+        if (mappedIn != MAP_FAILED) {
+            inputPtr = static_cast<const uint8_t*>(mappedIn);
+        }
+    }
+
+    if (!inputPtr) {
+        if (!readEntireFd(inFd, streamFallbackBuf_, inputBytes)) {
+            meta.errorMessage = "Failed reading JPEG header from FD";
+            return meta;
+        }
+        inputPtr = streamFallbackBuf_.data();
+    }
+
+    meta.exifOrientation = parseExifOrientation({inputPtr, inputBytes});
+
+    int w = 0;
+    int h = 0;
+    int subsamp = TJSAMP_420;
+    int cs = TJCS_YCbCr;
+    const int rc = tjDecompressHeader3(
+        static_cast<tjhandle>(tjDecompressor_),
+        inputPtr,
+        static_cast<unsigned long>(inputBytes),
+        &w, &h, &subsamp, &cs);
+
+    if (mappedIn != MAP_FAILED) {
+        ::munmap(mappedIn, inputBytes);
+    }
+
+    if (rc != 0 || w < 16 || h < 16) {
+        meta.errorMessage = std::string("tjDecompressHeader3 failed: ") +
+                            tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
+        return meta;
+    }
+
+    meta.valid = true;
+    meta.rawWidth = w;
+    meta.rawHeight = h;
+    if (meta.exifOrientation >= 5 && meta.exifOrientation <= 8) {
+        meta.uprightWidth = h;
+        meta.uprightHeight = w;
+    } else {
+        meta.uprightWidth = w;
+        meta.uprightHeight = h;
+    }
+    return meta;
+}
+
+LearnResult JpegYuvCodec::learnTemplateFromFd(
+    MosaicEngine& engine,
+    int inFd,
+    std::span<const NormalizedPolygon> uprightPolygons,
+    const std::string& outputTplPath,
+    const std::string& registerTemplateId) {
+
+    const auto tStart = SteadyClock::now();
+    LearnResult res{};
+    if (inFd < 0 || uprightPolygons.empty()) {
+        res.errorMessage = "Invalid input FD or empty polygon list";
+        return res;
+    }
+
+    struct stat st{};
+    void* mappedIn = MAP_FAILED;
+    size_t inputBytes = 0;
+    const uint8_t* inputPtr = nullptr;
+
+    if (::fstat(inFd, &st) == 0 && st.st_size >= 4) {
+        inputBytes = static_cast<size_t>(st.st_size);
+        mappedIn = ::mmap(nullptr, inputBytes, PROT_READ, MAP_PRIVATE, inFd, 0);
+        if (mappedIn != MAP_FAILED) {
+            (void)::madvise(mappedIn, inputBytes, MADV_SEQUENTIAL);
+            inputPtr = static_cast<const uint8_t*>(mappedIn);
+        }
+    }
+
+    if (!inputPtr) {
+        if (!readEntireFd(inFd, streamFallbackBuf_, inputBytes)) {
+            res.errorMessage = "Failed reading reference JPEG FD";
+            return res;
+        }
+        inputPtr = streamFallbackBuf_.data();
+    }
+
+    std::string err;
+    uint16_t exifOrientation = 1;
+    const bool decOk = decodeToYuvPlanes({inputPtr, inputBytes}, arena_, &exifOrientation, &err);
+    if (mappedIn != MAP_FAILED) {
+        ::munmap(mappedIn, inputBytes);
+    }
+    if (!decOk) {
+        res.errorMessage = err;
+        return res;
+    }
+
+    // Map user-drawn upright [0, 1] polygons into raw unrotated Y-plane [0, 1] coordinates
+    std::vector<NormalizedPolygon> rawPolygons;
+    rawPolygons.reserve(uprightPolygons.size());
+    for (const auto& upPoly : uprightPolygons) {
+        NormalizedPolygon rp;
+        rp.vertices.reserve(upPoly.vertices.size());
+        for (const auto& v : upPoly.vertices) {
+            const float ux = std::clamp(v.normX, 0.0f, 1.0f);
+            const float uy = std::clamp(v.normY, 0.0f, 1.0f);
+            rp.vertices.push_back(uprightToRawNormalized(ux, uy, exifOrientation));
+        }
+        rawPolygons.push_back(std::move(rp));
+    }
+
+    const YuvPlaneView yuvView = arena_.view();
+    const YPlaneConstView yView{
+        yuvView.yPtr,
+        yuvView.width,
+        yuvView.height,
+        yuvView.yRowStride
+    };
+
+    res = engine.learnTemplateToFile(
+        yView,
+        rawPolygons,
+        outputTplPath,
+        registerTemplateId,
+        exifOrientation);
+    res.elapsedUs = elapsedUs(tStart);
+    return res;
+}
+
+bool JpegYuvCodec::decodePreviewRgbaFromFd(
+    int inFd,
+    int32_t maxPreviewDim,
+    std::vector<uint32_t>& outUprightRgba,
+    int32_t& outUprightWidth,
+    int32_t& outUprightHeight,
+    std::string* errorOut) {
+
+    if (!tjDecompressor_ || inFd < 0) {
+        if (errorOut) *errorOut = "Invalid TurboJPEG decompressor or FD";
+        return false;
+    }
+
+    struct stat st{};
+    void* mappedIn = MAP_FAILED;
+    size_t inputBytes = 0;
+    const uint8_t* inputPtr = nullptr;
+
+    if (::fstat(inFd, &st) == 0 && st.st_size >= 4) {
+        inputBytes = static_cast<size_t>(st.st_size);
+        mappedIn = ::mmap(nullptr, inputBytes, PROT_READ, MAP_PRIVATE, inFd, 0);
+        if (mappedIn != MAP_FAILED) {
+            inputPtr = static_cast<const uint8_t*>(mappedIn);
+        }
+    }
+
+    if (!inputPtr) {
+        if (!readEntireFd(inFd, streamFallbackBuf_, inputBytes)) {
+            if (errorOut) *errorOut = "Failed reading preview JPEG FD";
+            return false;
+        }
+        inputPtr = streamFallbackBuf_.data();
+    }
+
+    const uint16_t orient = parseExifOrientation({inputPtr, inputBytes});
+    int rawW = 0;
+    int rawH = 0;
+    int subsamp = TJSAMP_420;
+    int cs = TJCS_YCbCr;
+    if (tjDecompressHeader3(
+            static_cast<tjhandle>(tjDecompressor_),
+            inputPtr,
+            static_cast<unsigned long>(inputBytes),
+            &rawW, &rawH, &subsamp, &cs) != 0 ||
+        rawW < 16 || rawH < 16) {
+        if (mappedIn != MAP_FAILED) ::munmap(mappedIn, inputBytes);
+        if (errorOut) {
+            *errorOut = std::string("tjDecompressHeader3 failed: ") +
+                        tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
+        }
+        return false;
+    }
+
+    // Choose hardware-SIMD IDCT scaling factor (1/1 .. 1/8) so even 108MP/200MP JPEGs stay < 13 MB
+    const int32_t targetMax = std::clamp(maxPreviewDim, 320, 2048);
+    int numFactors = 0;
+    const tjscalingfactor* factors = tjGetScalingFactors(&numFactors);
+    int scaledW = rawW;
+    int scaledH = rawH;
+
+    if (factors && numFactors > 0) {
+        int bestLeW = 0;
+        int bestLeH = 0;
+        int minCandW = rawW;
+        int minCandH = rawH;
+
+        for (int i = 0; i < numFactors; ++i) {
+            if (factors[i].num > factors[i].denom) continue; // Never upscale > 1/1
+            const int candW = TJSCALED(rawW, factors[i]);
+            const int candH = TJSCALED(rawH, factors[i]);
+            const int candMax = std::max(candW, candH);
+            if (candMax < std::max(minCandW, minCandH)) {
+                minCandW = candW;
+                minCandH = candH;
+            }
+            if (candMax <= targetMax && candMax > std::max(bestLeW, bestLeH)) {
+                bestLeW = candW;
+                bestLeH = candH;
+            }
+        }
+        scaledW = std::max(16, bestLeW > 0 ? bestLeW : minCandW);
+        scaledH = std::max(16, bestLeH > 0 ? bestLeH : minCandH);
+    }
+
+    std::vector<uint32_t> rawRgba(static_cast<size_t>(scaledW) * static_cast<size_t>(scaledH));
+    const int rc = tjDecompress2(
+        static_cast<tjhandle>(tjDecompressor_),
+        inputPtr,
+        static_cast<unsigned long>(inputBytes),
+        reinterpret_cast<unsigned char*>(rawRgba.data()),
+        scaledW,
+        scaledW * 4,
+        scaledH,
+        TJPF_RGBA,
+        TJFLAG_FASTDCT);
+
+    if (mappedIn != MAP_FAILED) {
+        ::munmap(mappedIn, inputBytes);
+    }
+
+    if (rc != 0) {
+        if (errorOut) {
+            *errorOut = std::string("tjDecompress2 preview failed: ") +
+                        tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
+        }
+        return false;
+    }
+
+    if (orient == 1) {
+        outUprightWidth = scaledW;
+        outUprightHeight = scaledH;
+        outUprightRgba = std::move(rawRgba);
+        return true;
+    }
+
+    const bool swapAxes = (orient >= 5 && orient <= 8);
+    const int32_t upW = swapAxes ? scaledH : scaledW;
+    const int32_t upH = swapAxes ? scaledW : scaledH;
+    outUprightWidth = upW;
+    outUprightHeight = upH;
+    outUprightRgba.resize(static_cast<size_t>(upW) * static_cast<size_t>(upH));
+
+    for (int32_t uy = 0; uy < upH; ++uy) {
+        uint32_t* dstRow = outUprightRgba.data() + static_cast<size_t>(uy) * upW;
+        for (int32_t ux = 0; ux < upW; ++ux) {
+            int32_t rx = ux;
+            int32_t ry = uy;
+            switch (orient) {
+                case 2: rx = (scaledW - 1) - ux; ry = uy; break;
+                case 3: rx = (scaledW - 1) - ux; ry = (scaledH - 1) - uy; break;
+                case 4: rx = ux;                 ry = (scaledH - 1) - uy; break;
+                case 5: rx = uy;                 ry = ux; break;
+                case 6: rx = uy;                 ry = (scaledH - 1) - ux; break;
+                case 7: rx = (scaledW - 1) - uy; ry = (scaledH - 1) - ux; break;
+                case 8: rx = (scaledW - 1) - uy; ry = ux; break;
+                default: break;
+            }
+            dstRow[ux] = rawRgba[static_cast<size_t>(ry) * scaledW + rx];
+        }
+    }
+    return true;
+}
+
 JpegBatchTelemetry JpegYuvCodec::processFdToFd(
     MosaicEngine& engine,
     int inFd,
@@ -735,10 +1020,12 @@ JpegBatchTelemetry JpegYuvCodec::processFdToFd(
     tel.width = view.width;
     tel.height = view.height;
 
-    // Step 2: Run Homography Auto-Mosaic IN-PLACE on decoded YUV planes
-    const MosaicProcessResult proc = engine.processYuvInPlace(view, overrideBlockSize);
+    // Step 2: Run Homography Auto-Mosaic (+ EXIF-aligned fixed fallback) IN-PLACE on YUV planes
+    const MosaicProcessResult proc =
+        engine.processYuvInPlace(view, overrideBlockSize, exifOrientation);
     tel.matchedAny = proc.matchedAny;
     tel.templatesMatched = proc.templatesMatched;
+    tel.fixedPositionApplied = proc.fixedPositionApplied;
     tel.bestInliers = proc.bestInlierCount;
     tel.homographyAndOrbUs = proc.downsampleAndOrbUs + proc.matchAndMagsacUs;
     tel.neonMosaicUs = proc.neonMosaicUs;

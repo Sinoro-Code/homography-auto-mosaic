@@ -1,32 +1,24 @@
 package com.antigravity.homographymosaic
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -42,20 +34,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import com.antigravity.homographymosaic.core.MosaicEngineSession
 import com.antigravity.homographymosaic.core.TemplateRepository
 import com.antigravity.homographymosaic.ui.BatchGalleryScreen
-import com.antigravity.homographymosaic.ui.CameraCaptureScreen
+import com.antigravity.homographymosaic.ui.PhotoLearnScreen
 
 private val TacticalDarkColorScheme = darkColorScheme(
     primary = Color(0xFF00E5A3),
@@ -69,8 +58,8 @@ private val TacticalDarkColorScheme = darkColorScheme(
 )
 
 private enum class AppDestination {
-    CAMERA_CAPTURE_AND_LEARN,
-    BATCH_GALLERY
+    LEARN_POSITION,
+    AUTO_MOSAIC_PHOTOS
 }
 
 class MainActivity : ComponentActivity() {
@@ -85,7 +74,11 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
 
-        engineSession = MosaicEngineSession(initialBlockSize = 16, initialNoiseAmplitude = 18)
+        engineSession = MosaicEngineSession(
+            initialBlockSize = 16,
+            initialNoiseAmplitude = 18,
+            initialFallbackToFixedPosition = true
+        )
         templateRepository = TemplateRepository(applicationContext, engineSession)
 
         setContent {
@@ -111,30 +104,20 @@ private fun HomographyMosaicApp(
     engineSession: MosaicEngineSession,
     templateRepository: TemplateRepository
 ) {
-    val context = LocalContext.current
-
-    var currentTab by rememberSaveable { mutableStateOf(AppDestination.CAMERA_CAPTURE_AND_LEARN) }
+    var currentTab by rememberSaveable { mutableStateOf(AppDestination.LEARN_POSITION) }
+    var hasAutoRoutedOnColdStart by rememberSaveable { mutableStateOf(false) }
     var blockSize by rememberSaveable { mutableIntStateOf(16) }
     var jpegQuality by rememberSaveable { mutableIntStateOf(92) }
+    var fallbackToFixedPosition by rememberSaveable { mutableStateOf(true) }
 
-    var hasCameraPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED
-        )
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasCameraPermission = granted
-    }
-
-    // Sub-1ms FAMTPL02 binary mmap cold-start preload
+    // Sub-1ms FAMTPL02 binary mmap cold-start preload (zero camera permissions needed)
     LaunchedEffect(Unit) {
         templateRepository.preloadAllTemplates()
-        if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
+        if (!hasAutoRoutedOnColdStart) {
+            hasAutoRoutedOnColdStart = true
+            if (templateRepository.templates.value.any { it.enabled }) {
+                currentTab = AppDestination.AUTO_MOSAIC_PHOTOS
+            }
         }
     }
 
@@ -158,13 +141,13 @@ private fun HomographyMosaicApp(
                 ) {
                     Column {
                         Text(
-                            text = "Homography Auto-Mosaic",
+                            text = "自碼系統",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                         Text(
-                            text = "Pure CPU NEON+POPCNT · YUV420 In-Place · Zero Bitmap",
+                            text = "打碼位置自學習 · 相簿極速自動打碼 · 純 CPU NEON",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFF94A3B8)
                         )
@@ -199,10 +182,10 @@ private fun HomographyMosaicApp(
         bottomBar = {
             NavigationBar(containerColor = Color(0xFF0F172A)) {
                 NavigationBarItem(
-                    selected = currentTab == AppDestination.CAMERA_CAPTURE_AND_LEARN,
-                    onClick = { currentTab = AppDestination.CAMERA_CAPTURE_AND_LEARN },
-                    icon = { Icon(Icons.Default.CameraAlt, contentDescription = null) },
-                    label = { Text("相機擷取與學習") },
+                    selected = currentTab == AppDestination.LEARN_POSITION,
+                    onClick = { currentTab = AppDestination.LEARN_POSITION },
+                    icon = { Icon(Icons.Default.CropFree, contentDescription = null) },
+                    label = { Text("1. 設定打碼位置") },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color(0xFF00E5A3),
                         selectedTextColor = Color(0xFF00E5A3),
@@ -212,10 +195,10 @@ private fun HomographyMosaicApp(
                     )
                 )
                 NavigationBarItem(
-                    selected = currentTab == AppDestination.BATCH_GALLERY,
-                    onClick = { currentTab = AppDestination.BATCH_GALLERY },
+                    selected = currentTab == AppDestination.AUTO_MOSAIC_PHOTOS,
+                    onClick = { currentTab = AppDestination.AUTO_MOSAIC_PHOTOS },
                     icon = { Icon(Icons.Default.PhotoLibrary, contentDescription = null) },
-                    label = { Text("相簿極速批次打碼") },
+                    label = { Text("2. 選取相片打碼") },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color(0xFF38BDF8),
                         selectedTextColor = Color(0xFF38BDF8),
@@ -234,68 +217,29 @@ private fun HomographyMosaicApp(
                 .background(Color(0xFF0B0F17))
         ) {
             when (currentTab) {
-                AppDestination.CAMERA_CAPTURE_AND_LEARN -> {
-                    if (hasCameraPermission) {
-                        CameraCaptureScreen(
-                            engineSession = engineSession,
-                            templateRepository = templateRepository,
-                            blockSize = blockSize,
-                            jpegQuality = jpegQuality
-                        )
-                    } else {
-                        CameraPermissionPrompt(
-                            onRequestPermission = {
-                                permissionLauncher.launch(Manifest.permission.CAMERA)
-                            }
-                        )
-                    }
+                AppDestination.LEARN_POSITION -> {
+                    PhotoLearnScreen(
+                        templateRepository = templateRepository,
+                        onLearnedSuccess = {
+                            currentTab = AppDestination.AUTO_MOSAIC_PHOTOS
+                        }
+                    )
                 }
 
-                AppDestination.BATCH_GALLERY -> {
+                AppDestination.AUTO_MOSAIC_PHOTOS -> {
                     BatchGalleryScreen(
                         engineSession = engineSession,
                         templateRepository = templateRepository,
                         blockSize = blockSize,
                         onBlockSizeChange = { blockSize = it },
                         jpegQuality = jpegQuality,
-                        onJpegQualityChange = { jpegQuality = it }
+                        onJpegQualityChange = { jpegQuality = it },
+                        fallbackToFixedPosition = fallbackToFixedPosition,
+                        onFallbackToFixedPositionChange = { fallbackToFixedPosition = it },
+                        onNavigateToLearn = { currentTab = AppDestination.LEARN_POSITION }
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun CameraPermissionPrompt(onRequestPermission: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "需要相機權限以啟用 YUV_420_888 零拷貝擷取",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = Color.White
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "相機影像僅於本機 YUV420 記憶體平面原地運算，不產生 Bitmap、不上傳任何外部伺服器。",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF94A3B8)
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        Button(
-            onClick = onRequestPermission,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF00E5A3),
-                contentColor = Color(0xFF0B0F17)
-            )
-        ) {
-            Text("授予相機權限", fontWeight = FontWeight.Bold)
         }
     }
 }

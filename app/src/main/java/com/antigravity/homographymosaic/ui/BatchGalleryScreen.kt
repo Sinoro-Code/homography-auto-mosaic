@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -45,6 +45,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -85,6 +86,9 @@ fun BatchGalleryScreen(
     onBlockSizeChange: (Int) -> Unit,
     jpegQuality: Int,
     onJpegQualityChange: (Int) -> Unit,
+    fallbackToFixedPosition: Boolean,
+    onFallbackToFixedPositionChange: (Boolean) -> Unit,
+    onNavigateToLearn: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -97,7 +101,7 @@ fun BatchGalleryScreen(
     var completedCount by remember { mutableIntStateOf(0) }
     var totalSelectedCount by remember { mutableIntStateOf(0) }
     var summaryHeadline by remember {
-        mutableStateOf("libjpeg-turbo 3.0+ YUVPlanes 直解直壓 · 全程零 Bitmap")
+        mutableStateOf("選取單張或多張相片，即自動在已學習位置完成不可逆打碼並存入相簿")
     }
     val reports = remember { mutableStateListOf<BatchItemReport>() }
 
@@ -133,8 +137,8 @@ fun BatchGalleryScreen(
             val wallMs = (System.nanoTime() - tBatchStartNs) / 1_000_000.0
             val peakMb = maxPeakBytes / (1024.0 * 1024.0)
             summaryHeadline =
-                "完成 ${uris.size} 張 (命中 $matchedPhotos 張) · 總耗時 ${"%.1f".format(wallMs)} ms · " +
-                    "原生記憶體峰值 ${"%.2f".format(peakMb)} MB"
+                "已完成 ${uris.size} 張（打碼 $matchedPhotos 張）· 總耗時 ${"%.1f".format(wallMs)} ms · " +
+                    "峰值 ${"%.1f".format(peakMb)} MB · 已存入相簿 HomographyMosaic"
             isProcessing = false
         }
     }
@@ -156,7 +160,7 @@ fun BatchGalleryScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. Batch Action & Engine Parameter Card
+        // 1. Photo Selection & Auto-Mosaic Action Card
         item {
             Card(
                 shape = RoundedCornerShape(20.dp),
@@ -176,7 +180,7 @@ fun BatchGalleryScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "FD 直解直壓極速批次打碼 (啟用範本: $activeCount)",
+                            text = "步驟 2：選取相片自動打碼（啟用位置: $activeCount）",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -188,6 +192,44 @@ fun BatchGalleryScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
+
+                    // Alignment Mode selector (Homography + Fixed Position vs Strict Homography only)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "位置套用模式:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFFCBD5E1)
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = fallbackToFixedPosition,
+                                onClick = {
+                                    onFallbackToFixedPositionChange(true)
+                                    engineSession.updateParameters(fallbackToFixedPosition = true)
+                                },
+                                label = { Text("自動追蹤 + 固定位置 (推薦)") },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFF00E5A3).copy(alpha = 0.22f),
+                                    selectedLabelColor = Color(0xFF00E5A3)
+                                )
+                            )
+                            FilterChip(
+                                selected = !fallbackToFixedPosition,
+                                onClick = {
+                                    onFallbackToFixedPositionChange(false)
+                                    engineSession.updateParameters(fallbackToFixedPosition = false)
+                                },
+                                label = { Text("僅特徵吻合時打碼") },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.24f),
+                                    selectedLabelColor = Color(0xFF38BDF8)
+                                )
+                            )
+                        }
+                    }
 
                     // Mosaic Block Size selector
                     Row(
@@ -223,7 +265,7 @@ fun BatchGalleryScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "JPEG 直壓品質:",
+                            text = "輸出品質:",
                             style = MaterialTheme.typography.labelMedium,
                             color = Color(0xFFCBD5E1)
                         )
@@ -254,77 +296,104 @@ fun BatchGalleryScreen(
                         )
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedButton(
-                            enabled = !isProcessing && activeCount > 0,
-                            onClick = {
-                                singlePicker.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Default.Photo, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("單張打碼")
-                        }
-
+                    if (activeCount == 0) {
                         Button(
-                            enabled = !isProcessing && activeCount > 0,
-                            onClick = {
-                                multiPicker.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            },
+                            onClick = onNavigateToLearn,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF00E5A3),
+                                containerColor = Color(0xFFFBBF24),
                                 contentColor = Color(0xFF0B0F17)
                             ),
-                            modifier = Modifier.weight(1.3f)
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(
-                                Icons.Default.PhotoLibrary,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("批次選取極速輸出", fontWeight = FontWeight.Bold)
+                            Icon(Icons.Default.AddCircleOutline, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("尚未設定打碼位置 · 點此前往設定", fontWeight = FontWeight.Bold)
                         }
-                    }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                enabled = !isProcessing,
+                                onClick = {
+                                    singlePicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    Icons.Default.Photo,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("選取單張打碼")
+                            }
 
-                    if (activeCount == 0) {
-                        Text(
-                            text = "提示：請先切換至「相機擷取與學習」分頁框選建立至少一組 FAMTPL02 範本。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFFBBF24)
-                        )
+                            Button(
+                                enabled = !isProcessing,
+                                onClick = {
+                                    multiPicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF00E5A3),
+                                    contentColor = Color(0xFF0B0F17)
+                                ),
+                                modifier = Modifier.weight(1.35f)
+                            ) {
+                                Icon(
+                                    Icons.Default.PhotoLibrary,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("選取多張自動打碼", fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // 2. FAMTPL02 Binary Template Vault Section
+        // 2. Learned Mosaic Positions (FAMTPL02 Vault)
         item {
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(top = 4.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    Icons.Default.FolderSpecial,
-                    contentDescription = null,
-                    tint = Color(0xFF38BDF8),
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "FAMTPL02 二進位範本庫 (${templates.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFFE2E8F0)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.FolderSpecial,
+                        contentDescription = null,
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "已學習打碼位置 (${templates.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFE2E8F0)
+                    )
+                }
+
+                TextButton(onClick = onNavigateToLearn) {
+                    Icon(
+                        Icons.Default.AddCircleOutline,
+                        contentDescription = null,
+                        tint = Color(0xFF00E5A3),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("新增 / 重設位置", color = Color(0xFF00E5A3))
+                }
             }
         }
 
@@ -344,7 +413,7 @@ fun BatchGalleryScreen(
         if (reports.isNotEmpty()) {
             item {
                 Text(
-                    text = "最近打碼效能明細 (${reports.size})",
+                    text = "最近打碼結果明細 (${reports.size})",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = Color(0xFFE2E8F0),
@@ -384,8 +453,8 @@ private fun TemplateEntryCard(
                     color = Color.White
                 )
                 Text(
-                    text = "ORB:${entry.keypointCount} · 遮罩:${entry.polygonCount}(${entry.vertexCount}點) · " +
-                        "${"%.1f".format(entry.fileBytes / 1024.0)}KB · mmap:${entry.lastMmapLoadUs}µs",
+                    text = "區域:${entry.polygonCount}處(${entry.vertexCount}點) · 特徵:${entry.keypointCount} · " +
+                        "${"%.1f".format(entry.fileBytes / 1024.0)}KB · 載入:${entry.lastMmapLoadUs}µs",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF94A3B8)
                 )
@@ -397,7 +466,7 @@ private fun TemplateEntryCard(
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Default.DeleteOutline,
-                    contentDescription = "刪除範本",
+                    contentDescription = "刪除此打碼位置",
                     tint = Color(0xFFF87171)
                 )
             }
@@ -413,6 +482,13 @@ private fun BatchTelemetryRow(report: BatchItemReport) {
     val mosMs = t.neonMosaicUs / 1000.0
     val encMs = t.jpegEncodeUs / 1000.0
     val totMs = t.totalUs / 1000.0
+
+    val alignDesc = when {
+        !t.matchedAny -> "未套用"
+        t.bestInliers > 0 && t.fixedPositionApplied == 0 -> "單應性追蹤(內點:${t.bestInliers})"
+        t.bestInliers == 0 && t.fixedPositionApplied > 0 -> "學習位置直接套用"
+        else -> "追蹤+位置(${t.templatesMatched}組)"
+    }
 
     Surface(
         shape = RoundedCornerShape(14.dp),
@@ -438,15 +514,15 @@ private fun BatchTelemetryRow(report: BatchItemReport) {
             Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "${report.outputName} (${t.width}x${t.height})",
+                    text = "${report.outputName} (${t.width}×${t.height}) · $alignDesc",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White
                 )
                 Text(
                     text = if (t.ioSuccess) {
-                        "直解:${"%.1f".format(decMs)}ms | ORB+MAGSAC:${"%.2f".format(orbMs)}ms (內點:${t.bestInliers}) | " +
-                            "NEON:${"%.2f".format(mosMs)}ms | 直壓:${"%.1f".format(encMs)}ms | 總計:${"%.1f".format(totMs)}ms"
+                        "直解:${"%.1f".format(decMs)}ms | 對位:${"%.2f".format(orbMs)}ms | " +
+                            "NEON打碼:${"%.2f".format(mosMs)}ms | 直壓:${"%.1f".format(encMs)}ms | 總計:${"%.1f".format(totMs)}ms"
                     } else {
                         "略過（非標準 YUV JPEG 檔案或讀取失敗）"
                     },
@@ -468,7 +544,7 @@ private suspend fun processSingleUriFdToFd(
 ): BatchItemReport = withContext(Dispatchers.Default) {
     val resolver = context.contentResolver
     val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-    val outName = "FAM_BATCH_${stamp}_$itemIndex.jpg"
+    val outName = "FAM_MOSAIC_${stamp}_$itemIndex.jpg"
 
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, outName)
@@ -486,7 +562,9 @@ private suspend fun processSingleUriFdToFd(
         ?: return@withContext BatchItemReport(
             index = itemIndex,
             outputName = outName,
-            telemetry = GalleryJpegTelemetry(false, false, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0)
+            telemetry = GalleryJpegTelemetry(
+                false, false, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0, 0
+            )
         )
 
     val telemetry = resolver.openFileDescriptor(sourceUri, "r")?.use { inPfd ->
@@ -498,7 +576,7 @@ private suspend fun processSingleUriFdToFd(
                 blockSize = blockSize
             )
         }
-    } ?: GalleryJpegTelemetry(false, false, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0)
+    } ?: GalleryJpegTelemetry(false, false, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0, 0)
 
     if (telemetry.ioSuccess) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

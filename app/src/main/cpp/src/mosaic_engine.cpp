@@ -742,7 +742,7 @@ bool MappedFamTemplate::bindAndValidate(const uint8_t* base, size_t sizeBytes, b
         return false;
     }
     if (hdr->refWidth < 16 || hdr->refHeight < 16 ||
-        hdr->keypointCount < 4 || hdr->keypointCount > kMaxTemplateKeypoints ||
+        hdr->keypointCount > kMaxTemplateKeypoints ||
         hdr->polygonCount < 1 || hdr->polygonCount > kMaxTemplatePolygons ||
         hdr->totalVertexCount < 3 || hdr->totalVertexCount > kMaxTemplateVertices) {
         if (errorOut) *errorOut = "FAMTPL02 counts or reference dimensions out of valid range";
@@ -816,13 +816,14 @@ bool serializeFamTemplateToBuffer(
     std::span<const FamTplVertex> vertices,
     uint64_t createdEpochMs,
     std::vector<uint8_t>& outBytes,
-    std::string* errorOut) {
+    std::string* errorOut,
+    uint16_t refExifOrientation) {
 
     if (refWidth < 16 || refHeight < 16) {
         if (errorOut) *errorOut = "Invalid reference dimensions";
         return false;
     }
-    if (keypoints.size() < 4 || keypoints.size() > kMaxTemplateKeypoints ||
+    if (keypoints.size() > kMaxTemplateKeypoints ||
         descriptors.size() != keypoints.size() * kOrbDescriptorBytes) {
         if (errorOut) *errorOut = "Invalid ORB keypoint/descriptor count";
         return false;
@@ -841,15 +842,19 @@ bool serializeFamTemplateToBuffer(
 
     outBytes.assign(totalBytes, 0);
 
-    std::memcpy(outBytes.data() + descOffset, descriptors.data(), descriptors.size_bytes());
-    std::memcpy(outBytes.data() + kpOffset, keypoints.data(), keypoints.size_bytes());
+    if (!descriptors.empty()) {
+        std::memcpy(outBytes.data() + descOffset, descriptors.data(), descriptors.size_bytes());
+    }
+    if (!keypoints.empty()) {
+        std::memcpy(outBytes.data() + kpOffset, keypoints.data(), keypoints.size_bytes());
+    }
     std::memcpy(outBytes.data() + polyOffset, polygons.data(), polygons.size_bytes());
     std::memcpy(outBytes.data() + vertOffset, vertices.data(), vertices.size_bytes());
 
     FamTplHeader hdr{};
     std::memcpy(hdr.magic, kFamTplMagic, sizeof(kFamTplMagic));
     hdr.version = kFamTplVersion;
-    hdr.flags = polygons.size() > 1 ? 0x0001U : 0x0000U;
+    hdr.flags = encodeFamTplFlags(polygons.size() > 1, refExifOrientation);
     hdr.refWidth = refWidth;
     hdr.refHeight = refHeight;
     hdr.keypointCount = static_cast<uint32_t>(keypoints.size());
@@ -876,11 +881,13 @@ bool writeFamTemplateToFd(
     std::span<const FamTplPolygonSpan> polygons,
     std::span<const FamTplVertex> vertices,
     uint64_t createdEpochMs,
-    std::string* errorOut) {
+    std::string* errorOut,
+    uint16_t refExifOrientation) {
 
     std::vector<uint8_t> bytes;
     if (!serializeFamTemplateToBuffer(refWidth, refHeight, keypoints, descriptors,
-                                      polygons, vertices, createdEpochMs, bytes, errorOut)) {
+                                      polygons, vertices, createdEpochMs, bytes, errorOut,
+                                      refExifOrientation)) {
         return false;
     }
     if (::ftruncate(fd, 0) != 0 && errno != EINVAL) {
@@ -904,7 +911,8 @@ bool writeFamTemplateToFile(
     std::span<const FamTplPolygonSpan> polygons,
     std::span<const FamTplVertex> vertices,
     uint64_t createdEpochMs,
-    std::string* errorOut) {
+    std::string* errorOut,
+    uint16_t refExifOrientation) {
 
     const std::string tmpPath = path + ".tmp";
     const int fd = ::open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
@@ -913,7 +921,8 @@ bool writeFamTemplateToFile(
         return false;
     }
     const bool ok = writeFamTemplateToFd(fd, refWidth, refHeight, keypoints, descriptors,
-                                         polygons, vertices, createdEpochMs, errorOut);
+                                         polygons, vertices, createdEpochMs, errorOut,
+                                         refExifOrientation);
     if (ok) {
         (void)::fsync(fd);
     }
@@ -1168,7 +1177,8 @@ LearnResult MosaicEngine::learnTemplateToBuffer(
     const YPlaneConstView& yView,
     std::span<const NormalizedPolygon> polygons,
     std::vector<uint8_t>& outFamTplBytes,
-    const std::string& registerTemplateId) {
+    const std::string& registerTemplateId,
+    uint16_t refExifOrientation) {
 
     const auto tStart = SteadyClock::now();
     LearnResult res{};
@@ -1214,26 +1224,27 @@ LearnResult MosaicEngine::learnTemplateToBuffer(
         impl_->learnOrb->detectAndCompute(workY, cv::noArray(), cvKps, cvDesc);
     }
 
-    if (cvKps.size() < 12 || cvDesc.empty() || cvDesc.cols != static_cast<int>(kOrbDescriptorBytes)) {
-        res.errorMessage = "Insufficient visual texture: extracted fewer than 12 ORB keypoints";
-        res.elapsedUs = elapsedMicroseconds(tStart);
-        return res;
-    }
+    std::vector<FamTplKeypoint> tplKps;
+    std::vector<uint8_t> tplDesc;
+    if (!cvKps.empty() && !cvDesc.empty() &&
+        cvDesc.cols == static_cast<int>(kOrbDescriptorBytes)) {
+        const float invW = 1.0f / static_cast<float>(yView.width);
+        const float invH = 1.0f / static_cast<float>(yView.height);
+        const float invMaxDim = 1.0f / static_cast<float>(std::max(yView.width, yView.height));
 
-    const float invW = 1.0f / static_cast<float>(yView.width);
-    const float invH = 1.0f / static_cast<float>(yView.height);
-    const float invMaxDim = 1.0f / static_cast<float>(std::max(yView.width, yView.height));
+        tplKps.resize(cvKps.size());
+        tplDesc.resize(cvKps.size() * kOrbDescriptorBytes);
 
-    std::vector<FamTplKeypoint> tplKps(cvKps.size());
-    std::vector<uint8_t> tplDesc(cvKps.size() * kOrbDescriptorBytes);
-
-    for (size_t i = 0; i < cvKps.size(); ++i) {
-        tplKps[i].normX = std::clamp((cvKps[i].pt.x * scaleX) * invW, 0.0f, 1.0f);
-        tplKps[i].normY = std::clamp((cvKps[i].pt.y * scaleY) * invH, 0.0f, 1.0f);
-        tplKps[i].size = (cvKps[i].size * std::max(scaleX, scaleY)) * invMaxDim;
-        tplKps[i].angleDeg = cvKps[i].angle;
-        std::memcpy(tplDesc.data() + i * kOrbDescriptorBytes, cvDesc.ptr<uint8_t>(static_cast<int>(i)),
-                    kOrbDescriptorBytes);
+        for (size_t i = 0; i < cvKps.size(); ++i) {
+            tplKps[i].normX = std::clamp((cvKps[i].pt.x * scaleX) * invW, 0.0f, 1.0f);
+            tplKps[i].normY = std::clamp((cvKps[i].pt.y * scaleY) * invH, 0.0f, 1.0f);
+            tplKps[i].size = (cvKps[i].size * std::max(scaleX, scaleY)) * invMaxDim;
+            tplKps[i].angleDeg = cvKps[i].angle;
+            std::memcpy(
+                tplDesc.data() + i * kOrbDescriptorBytes,
+                cvDesc.ptr<uint8_t>(static_cast<int>(i)),
+                kOrbDescriptorBytes);
+        }
     }
 
     std::string err;
@@ -1241,7 +1252,7 @@ LearnResult MosaicEngine::learnTemplateToBuffer(
             static_cast<uint32_t>(yView.width),
             static_cast<uint32_t>(yView.height),
             tplKps, tplDesc, spans, flatVertices,
-            currentEpochMs(), outFamTplBytes, &err)) {
+            currentEpochMs(), outFamTplBytes, &err, refExifOrientation)) {
         res.errorMessage = err;
         res.elapsedUs = elapsedMicroseconds(tStart);
         return res;
@@ -1269,11 +1280,12 @@ LearnResult MosaicEngine::learnTemplateToFile(
     const YPlaneConstView& yView,
     std::span<const NormalizedPolygon> polygons,
     const std::string& outputTplPath,
-    const std::string& registerTemplateId) {
+    const std::string& registerTemplateId,
+    uint16_t refExifOrientation) {
 
     const auto tStart = SteadyClock::now();
     std::vector<uint8_t> bytes;
-    LearnResult res = learnTemplateToBuffer(yView, polygons, bytes, "");
+    LearnResult res = learnTemplateToBuffer(yView, polygons, bytes, "", refExifOrientation);
     if (!res.success) {
         return res;
     }
@@ -1424,7 +1436,8 @@ void MosaicEngine::applyPolygonMosaicInPlace(
 
 MosaicProcessResult MosaicEngine::processYuvInPlace(
     const YuvPlaneView& frame,
-    int32_t overrideBlockSize) {
+    int32_t overrideBlockSize,
+    uint16_t targetExifOrientation) {
 
     const auto tTotalStart = SteadyClock::now();
     MosaicProcessResult result{};
@@ -1441,6 +1454,7 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
     float scaleToFullY = 1.0f;
     int32_t workW = frame.width;
     int32_t workH = frame.height;
+    bool anyTemplateHasFeatures = false;
 
     // Step 1: Extract target ORB features ONCE on NEON-downsampled strided Y plane
     {
@@ -1452,26 +1466,44 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
         }
         cfg = impl_->config;
 
-        cv::Mat workY = impl_->prepareWorkYMat(
-            frame.yPtr, frame.width, frame.height, frame.yRowStride,
-            false, scaleToFullX, scaleToFullY);
-        workW = workY.cols;
-        workH = workY.rows;
-        // Note: cv::ORB uses OpenCV internal buffers so lock guards detector state cleanly
-        impl_->targetOrb->detectAndCompute(workY, cv::noArray(), targetKps, targetDesc);
+        for (const auto& [_, tpl] : impl_->templates) {
+            if (tpl.valid() &&
+                static_cast<int32_t>(tpl.keypointCount()) >= cfg.minInliers) {
+                anyTemplateHasFeatures = true;
+                break;
+            }
+        }
+
+        if (anyTemplateHasFeatures) {
+            cv::Mat workY = impl_->prepareWorkYMat(
+                frame.yPtr, frame.width, frame.height, frame.yRowStride,
+                false, scaleToFullX, scaleToFullY);
+            workW = workY.cols;
+            workH = workY.rows;
+            // Note: cv::ORB uses OpenCV internal buffers so lock guards detector state cleanly
+            impl_->targetOrb->detectAndCompute(workY, cv::noArray(), targetKps, targetDesc);
+        }
         result.downsampleAndOrbUs = elapsedMicroseconds(tOrbStart);
     }
 
     result.targetKeypoints = static_cast<uint32_t>(targetKps.size());
-    if (targetKps.size() < static_cast<size_t>(cfg.minInliers) || targetDesc.empty()) {
+    const bool canAttemptHomography =
+        anyTemplateHasFeatures &&
+        targetKps.size() >= static_cast<size_t>(cfg.minInliers) &&
+        !targetDesc.empty();
+
+    if (!canAttemptHomography && !cfg.fallbackToFixedPosition) {
         result.totalUs = elapsedMicroseconds(tTotalStart);
         result.statusMessage = "Insufficient ORB keypoints on target frame";
         return result;
     }
 
-    const std::span<const uint8_t> targetDescSpan(
-        targetDesc.ptr<uint8_t>(0),
-        targetKps.size() * kOrbDescriptorBytes);
+    const std::span<const uint8_t> targetDescSpan =
+        canAttemptHomography
+            ? std::span<const uint8_t>(
+                  targetDesc.ptr<uint8_t>(0),
+                  targetKps.size() * kOrbDescriptorBytes)
+            : std::span<const uint8_t>{};
 
     // Step 2: Match against all loaded memory-mapped FAMTPL02 templates + USAC_MAGSAC
     const auto tMatchStart = SteadyClock::now();
@@ -1490,103 +1522,130 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
                 continue;
             }
 
-            // Query = target frame descriptors, Train = template descriptors
-            matchDescriptorsHammingPopcnt(
-                targetDescSpan,
-                tpl.descriptors(),
-                cfg.loweRatio,
-                cfg.maxHammingDist,
-                rawMatches);
-
-            result.bestMatchCount = std::max(
-                result.bestMatchCount, static_cast<uint32_t>(rawMatches.size()));
-
-            if (static_cast<int32_t>(rawMatches.size()) < cfg.minInliers) {
-                continue;
-            }
-
             const auto* hdr = tpl.header();
-            const float refWorkScaleX = static_cast<float>(hdr->refWidth);
-            const float refWorkScaleY = static_cast<float>(hdr->refHeight);
-            const auto tplKps = tpl.keypoints();
-
-            srcPts.clear();
-            dstWorkPts.clear();
-            srcPts.reserve(rawMatches.size());
-            dstWorkPts.reserve(rawMatches.size());
-
-            for (const auto& [qIdx, tIdx] : rawMatches) {
-                const auto& tkp = tplKps[static_cast<size_t>(tIdx)];
-                const auto& qkp = targetKps[static_cast<size_t>(qIdx)];
-                srcPts.emplace_back(tkp.normX * refWorkScaleX, tkp.normY * refWorkScaleY);
-                dstWorkPts.emplace_back(qkp.pt.x, qkp.pt.y);
-            }
-
-            cv::Mat inlierMask;
-            cv::UsacParams usacParams{};
-            usacParams.sampler = cv::SAMPLING_UNIFORM;
-            usacParams.score = cv::SCORE_METHOD_MAGSAC;
-            usacParams.loMethod = cv::LOCAL_OPTIM_SIGMA;
-            usacParams.maxIterations = cfg.magsacMaxIters;
-            usacParams.confidence = 0.995;
-            usacParams.threshold = cfg.magsacReprojThreshold;
-            usacParams.final_polisher = cv::MAGSAC;
-
-            cv::Mat H_work = cv::findHomography(srcPts, dstWorkPts, inlierMask, usacParams);
-            if (H_work.empty()) {
-                continue;
-            }
-
-            uint32_t inliers = 0;
-            for (int i = 0; i < inlierMask.rows; ++i) {
-                if (inlierMask.at<uint8_t>(i, 0) != 0) {
-                    ++inliers;
-                }
-            }
-            result.bestInlierCount = std::max(result.bestInlierCount, inliers);
-
-            if (static_cast<int32_t>(inliers) < cfg.minInliers) {
-                continue;
-            }
-
-            if (!isHomographyGeometricallyValid(
-                    H_work,
-                    static_cast<double>(refWorkScaleX),
-                    static_cast<double>(refWorkScaleY),
-                    static_cast<double>(workW),
-                    static_cast<double>(workH))) {
-                continue;
-            }
-
-            // Scale H_work from working pyramid pixels directly into full 12MP frame pixels:
-            // H_full = diag(scaleToFullX, scaleToFullY, 1) * H_work
-            cv::Mat H_full = H_work.clone();
-            H_full.row(0) *= static_cast<double>(scaleToFullX);
-            H_full.row(1) *= static_cast<double>(scaleToFullY);
-
             const auto polySpans = tpl.polygons();
             const auto tplVerts = tpl.vertices();
+            bool matchedHomography = false;
 
-            for (const auto& span : polySpans) {
-                std::vector<cv::Point2f> polySrc;
-                polySrc.reserve(span.vertexCount);
-                for (uint32_t vi = 0; vi < span.vertexCount; ++vi) {
-                    const auto& v = tplVerts[span.firstVertex + vi];
-                    polySrc.emplace_back(v.normX * refWorkScaleX, v.normY * refWorkScaleY);
+            if (canAttemptHomography &&
+                static_cast<int32_t>(tpl.keypointCount()) >= cfg.minInliers) {
+                // Query = target frame descriptors, Train = template descriptors
+                matchDescriptorsHammingPopcnt(
+                    targetDescSpan,
+                    tpl.descriptors(),
+                    cfg.loweRatio,
+                    cfg.maxHammingDist,
+                    rawMatches);
+
+                result.bestMatchCount = std::max(
+                    result.bestMatchCount, static_cast<uint32_t>(rawMatches.size()));
+
+                if (static_cast<int32_t>(rawMatches.size()) >= cfg.minInliers) {
+                    const float refWorkScaleX = static_cast<float>(hdr->refWidth);
+                    const float refWorkScaleY = static_cast<float>(hdr->refHeight);
+                    const auto tplKps = tpl.keypoints();
+
+                    srcPts.clear();
+                    dstWorkPts.clear();
+                    srcPts.reserve(rawMatches.size());
+                    dstWorkPts.reserve(rawMatches.size());
+
+                    for (const auto& [qIdx, tIdx] : rawMatches) {
+                        const auto& tkp = tplKps[static_cast<size_t>(tIdx)];
+                        const auto& qkp = targetKps[static_cast<size_t>(qIdx)];
+                        srcPts.emplace_back(tkp.normX * refWorkScaleX, tkp.normY * refWorkScaleY);
+                        dstWorkPts.emplace_back(qkp.pt.x, qkp.pt.y);
+                    }
+
+                    cv::Mat inlierMask;
+                    cv::UsacParams usacParams{};
+                    usacParams.sampler = cv::SAMPLING_UNIFORM;
+                    usacParams.score = cv::SCORE_METHOD_MAGSAC;
+                    usacParams.loMethod = cv::LOCAL_OPTIM_SIGMA;
+                    usacParams.maxIterations = cfg.magsacMaxIters;
+                    usacParams.confidence = 0.995;
+                    usacParams.threshold = cfg.magsacReprojThreshold;
+                    usacParams.final_polisher = cv::MAGSAC;
+
+                    cv::Mat H_work = cv::findHomography(srcPts, dstWorkPts, inlierMask, usacParams);
+                    if (!H_work.empty()) {
+                        uint32_t inliers = 0;
+                        for (int i = 0; i < inlierMask.rows; ++i) {
+                            if (inlierMask.at<uint8_t>(i, 0) != 0) {
+                                ++inliers;
+                            }
+                        }
+                        result.bestInlierCount = std::max(result.bestInlierCount, inliers);
+
+                        if (static_cast<int32_t>(inliers) >= cfg.minInliers &&
+                            isHomographyGeometricallyValid(
+                                H_work,
+                                static_cast<double>(refWorkScaleX),
+                                static_cast<double>(refWorkScaleY),
+                                static_cast<double>(workW),
+                                static_cast<double>(workH))) {
+                            // Scale H_work from working pyramid pixels directly into full frame pixels
+                            cv::Mat H_full = H_work.clone();
+                            H_full.row(0) *= static_cast<double>(scaleToFullX);
+                            H_full.row(1) *= static_cast<double>(scaleToFullY);
+
+                            for (const auto& span : polySpans) {
+                                std::vector<cv::Point2f> polySrc;
+                                polySrc.reserve(span.vertexCount);
+                                for (uint32_t vi = 0; vi < span.vertexCount; ++vi) {
+                                    const auto& v = tplVerts[span.firstVertex + vi];
+                                    polySrc.emplace_back(
+                                        v.normX * refWorkScaleX, v.normY * refWorkScaleY);
+                                }
+
+                                std::vector<cv::Point2f> polyDst;
+                                cv::perspectiveTransform(polySrc, polyDst, H_full);
+
+                                ProjectedPolygon projPoly;
+                                projPoly.templateId = tplId;
+                                projPoly.pixelVertices.reserve(polyDst.size());
+                                for (const auto& p : polyDst) {
+                                    projPoly.pixelVertices.push_back(FamTplVertex{p.x, p.y});
+                                }
+                                allProjected.push_back(std::move(projPoly));
+                            }
+                            matchedHomography = true;
+                            ++result.templatesMatched;
+                        }
+                    }
                 }
-
-                std::vector<cv::Point2f> polyDst;
-                cv::perspectiveTransform(polySrc, polyDst, H_full);
-
-                ProjectedPolygon projPoly;
-                projPoly.templateId = tplId;
-                projPoly.pixelVertices.reserve(polyDst.size());
-                for (const auto& p : polyDst) {
-                    projPoly.pixelVertices.push_back(FamTplVertex{p.x, p.y});
-                }
-                allProjected.push_back(std::move(projPoly));
             }
-            ++result.templatesMatched;
+
+            // Fallback: apply learned normalized [0, 1] position directly (with EXIF alignment)
+            if (!matchedHomography && cfg.fallbackToFixedPosition) {
+                const uint16_t refOrient = decodeFamTplExifOrientation(hdr->flags);
+                const uint16_t tgtOrient =
+                    (targetExifOrientation >= 1 && targetExifOrientation <= 8)
+                        ? targetExifOrientation
+                        : 1;
+                const float fw = static_cast<float>(frame.width);
+                const float fh = static_cast<float>(frame.height);
+
+                for (const auto& span : polySpans) {
+                    ProjectedPolygon projPoly;
+                    projPoly.templateId = tplId;
+                    projPoly.pixelVertices.reserve(span.vertexCount);
+                    for (uint32_t vi = 0; vi < span.vertexCount; ++vi) {
+                        const auto& v = tplVerts[span.firstVertex + vi];
+                        const FamTplVertex upright =
+                            rawToUprightNormalized(v.normX, v.normY, refOrient);
+                        const FamTplVertex tgtRaw =
+                            uprightToRawNormalized(upright.normX, upright.normY, tgtOrient);
+                        projPoly.pixelVertices.push_back(FamTplVertex{
+                            std::clamp(tgtRaw.normX, 0.0f, 1.0f) * fw,
+                            std::clamp(tgtRaw.normY, 0.0f, 1.0f) * fh
+                        });
+                    }
+                    allProjected.push_back(std::move(projPoly));
+                }
+                ++result.templatesMatched;
+                ++result.fixedPositionApplied;
+            }
         }
     }
     result.matchAndMagsacUs = elapsedMicroseconds(tMatchStart);
@@ -1609,7 +1668,9 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
         result.neonMosaicUs = elapsedMicroseconds(tMosaicStart);
         result.matchedAny = true;
         result.projectedPolygons = std::move(allProjected);
-        result.statusMessage = "Matched and applied NEON mosaic in-place";
+        result.statusMessage = (result.fixedPositionApplied > 0 && result.bestInlierCount == 0)
+                                   ? "Applied learned position NEON mosaic in-place"
+                                   : "Matched Homography and applied NEON mosaic in-place";
     } else {
         result.statusMessage = "Target not present in frame";
     }

@@ -131,6 +131,62 @@ private:
 };
 
 /**
+ * Encodes reference EXIF Orientation (1..8) into FamTplHeader::flags bits [8..11].
+ */
+[[nodiscard]] constexpr uint16_t encodeFamTplFlags(
+    bool multiPolygon, uint16_t refExifOrientation = 1) noexcept {
+    const uint16_t orient = (refExifOrientation >= 1 && refExifOrientation <= 8)
+                                ? refExifOrientation
+                                : 1;
+    return static_cast<uint16_t>((multiPolygon ? 0x0001U : 0x0000U) |
+                                 ((orient & 0x000FU) << 8U));
+}
+
+/**
+ * Extracts reference EXIF Orientation (1..8, defaulting to 1 for legacy templates) from flags.
+ */
+[[nodiscard]] constexpr uint16_t decodeFamTplExifOrientation(uint16_t flags) noexcept {
+    const uint16_t orient = static_cast<uint16_t>((flags >> 8U) & 0x000FU);
+    return (orient >= 1 && orient <= 8) ? orient : 1;
+}
+
+/**
+ * Maps raw unrotated YUV plane normalized coordinates (rx, ry) in [0, 1]^2
+ * into upright viewer coordinates (ux, uy) in [0, 1]^2 according to EXIF Orientation (1..8).
+ */
+[[nodiscard]] constexpr FamTplVertex rawToUprightNormalized(
+    float rx, float ry, uint16_t exifOrientation) noexcept {
+    switch (exifOrientation) {
+        case 2:  return {1.0f - rx, ry};
+        case 3:  return {1.0f - rx, 1.0f - ry};
+        case 4:  return {rx, 1.0f - ry};
+        case 5:  return {ry, rx};
+        case 6:  return {1.0f - ry, rx};
+        case 7:  return {1.0f - ry, 1.0f - rx};
+        case 8:  return {ry, 1.0f - rx};
+        default: return {rx, ry};
+    }
+}
+
+/**
+ * Maps upright viewer normalized coordinates (ux, uy) in [0, 1]^2 (as drawn by user on photo)
+ * back into raw unrotated YUV plane normalized coordinates (rx, ry) in [0, 1]^2.
+ */
+[[nodiscard]] constexpr FamTplVertex uprightToRawNormalized(
+    float ux, float uy, uint16_t exifOrientation) noexcept {
+    switch (exifOrientation) {
+        case 2:  return {1.0f - ux, uy};
+        case 3:  return {1.0f - ux, 1.0f - uy};
+        case 4:  return {ux, 1.0f - uy};
+        case 5:  return {uy, ux};
+        case 6:  return {uy, 1.0f - ux};
+        case 7:  return {1.0f - uy, 1.0f - ux};
+        case 8:  return {1.0f - uy, ux};
+        default: return {ux, uy};
+    }
+}
+
+/**
  * Serializes normalized ORB keypoints, 256-bit descriptors, and normalized polygons
  * into a FAMTPL02 byte vector or directly to a file/FD.
  */
@@ -143,7 +199,8 @@ private:
     std::span<const FamTplVertex> vertices,
     uint64_t createdEpochMs,
     std::vector<uint8_t>& outBytes,
-    std::string* errorOut = nullptr);
+    std::string* errorOut = nullptr,
+    uint16_t refExifOrientation = 1);
 
 [[nodiscard]] bool writeFamTemplateToFile(
     const std::string& path,
@@ -154,7 +211,8 @@ private:
     std::span<const FamTplPolygonSpan> polygons,
     std::span<const FamTplVertex> vertices,
     uint64_t createdEpochMs,
-    std::string* errorOut = nullptr);
+    std::string* errorOut = nullptr,
+    uint16_t refExifOrientation = 1);
 
 [[nodiscard]] bool writeFamTemplateToFd(
     int fd,
@@ -165,6 +223,7 @@ private:
     std::span<const FamTplPolygonSpan> polygons,
     std::span<const FamTplVertex> vertices,
     uint64_t createdEpochMs,
-    std::string* errorOut = nullptr);
+    std::string* errorOut = nullptr,
+    uint16_t refExifOrientation = 1);
 
 } // namespace fam
