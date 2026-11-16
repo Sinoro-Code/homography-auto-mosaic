@@ -86,15 +86,17 @@ public:
     [[nodiscard]] JpegHeaderMeta inspectFd(int inFd);
 
     /**
-     * Decodes a JPEG memory buffer directly into 64-byte aligned YUV planes (zero RGB).
-     * Also extracts the EXIF Orientation tag (1..8) if present so upright display is preserved
-     * without rotating 12MP pixel buffers in CPU memory.
+     * Decodes an image buffer or FD into 64-byte aligned YUV planes:
+     *   - Tier 1: Direct zero-RGB tjDecompressToYUVPlanes for standard 4:2:0/4:2:2/4:4:4/Gray JPEGs
+     *   - Tier 2: tj3Decompress8 + ARM NEON BT.601 YUV420 conversion for 4:4:0/4:1:1/CMYK/RGB JPEGs
+     *   - Tier 3: NDK AImageDecoder + ARM NEON BT.601 YUV420 conversion for HEIC/HEIF, PNG, WebP, AVIF, RAW
      */
     [[nodiscard]] bool decodeToYuvPlanes(
         std::span<const uint8_t> jpegBytes,
         AlignedYuvArena& outArena,
         uint16_t* outExifOrientation = nullptr,
-        std::string* errorOut = nullptr);
+        std::string* errorOut = nullptr,
+        int optionalInFd = -1);
 
     /**
      * Learns a FAMTPL02 binary template directly from a Gallery JPEG FD in YUV420 space

@@ -101,7 +101,7 @@ fun BatchGalleryScreen(
     var completedCount by remember { mutableIntStateOf(0) }
     var totalSelectedCount by remember { mutableIntStateOf(0) }
     var summaryHeadline by remember {
-        mutableStateOf("選取單張或多張相片，即自動在已學習位置完成不可逆打碼並存入相簿")
+        mutableStateOf("支援相機全格式相片（JPEG / HEIC / HEIF / PNG / WebP / AVIF），選取即自動在已學習位置完成打碼並存入相簿")
     }
     val reports = remember { mutableStateListOf<BatchItemReport>() }
 
@@ -524,7 +524,7 @@ private fun BatchTelemetryRow(report: BatchItemReport) {
                         "直解:${"%.1f".format(decMs)}ms | 對位:${"%.2f".format(orbMs)}ms | " +
                             "NEON打碼:${"%.2f".format(mosMs)}ms | 直壓:${"%.1f".format(encMs)}ms | 總計:${"%.1f".format(totMs)}ms"
                     } else {
-                        "略過（非標準 YUV JPEG 檔案或讀取失敗）"
+                        "略過（無法解析此影像格式或讀取失敗）"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF94A3B8)

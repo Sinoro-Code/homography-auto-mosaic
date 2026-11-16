@@ -9,10 +9,13 @@
 1. **100% 純 CPU 硬體加速（零 GPU / 零 NPU 驅動碎片化風險）**
    - 嚴格禁用 `NNAPI`、`Vulkan`、`OpenCL`、`TFLite`、`RenderScript` 與任何 GPU Shader，並於引擎啟動時強制執行 `cv::ocl::setUseOpenCL(false)`，徹底杜絕高通、聯發科、三星 Exynos、Google Tensor 與舊款麒麟晶片之驅動閃退。
    - 全面採用 `<arm_neon.h>` **ARM NEON SIMD** 向量化指令集與硬體 **POPCNT**（`arm64-v8a` 使用 `vcntq_u8` + `vaddlvq_u8`；`armeabi-v7a` 使用 `vcnt.8` + `vpaddl`）計算 256-bit ORB 漢明距離（Hamming Distance）與 Lowe's Ratio Test。
-2. **全鏈路零 Java RGB 影像堆積 / `YUV420` 原地打碼**
-   - 無相機權限、零執行期權限要求（Android 10+ 採用系統 `Photo Picker` + `MediaStore`）。
-   - **範例相片預覽與位置框選**：透過 NDK `ANativeWindow_fromSurface` 搭配 `libjpeg-turbo` 硬體 SIMD IDCT 降採樣直繪至硬體 `Surface`，並自動處理全部 8 種 JEITA EXIF Orientation 正向旋轉對齊。
-   - **相簿單張 / 批次自動打碼**：Photo Picker 取得來源與目標 `ParcelFileDescriptor` (`fd`)，原生層以唯讀 `mmap` 零拷貝映射輸入 JPEG，呼叫 `tjDecompressToYUVPlanes` 直解至 64-byte 對齊之可重用 YUV420 Arena，原地打碼後以 `tjCompressFromYUVPlanes` 直壓寫出，並保留最小化 38-byte EXIF `0x0112` Orientation 標籤（自動剝離原始 GPS 與相機序號等隱私欄位）。
+2. **全鏈路零 Java RGB 影像堆積 / 全格式相機相片相容 + `YUV420` 原地打碼**
+   - 無相機權限、零執行期權限要求（Android 10+ 採用系統 `Photo Picker` + `MediaStore`），並禁止在 Kotlin 層產生 `android.graphics.Bitmap`。
+   - **三層級原生全格式相機相片解碼器 (`JpegYuvCodec`)**：
+     - **Tier 1（零 RGB 極速通道）**：針對標準 8-bit `4:2:0` / `4:2:2` / `4:4:4` / `Gray` 相機 JPEG，以唯讀 `mmap` 搭配 `tjDecompressToYUVPlanes` 直解至 64-byte 對齊之可重用 YUV420 Arena。
+     - **Tier 2（特殊 ISP 取樣 JPEG 通道）**：針對聯發科/三星 ISP 旋轉後常見之 `4:4:0`、`4:1:1`、自訂 MCU 取樣 (`TJSAMP_UNKNOWN`)、`CMYK` / `RGB` 或超高畫素（108MP / 200MP）JPEG，透過 `tj3Decompress8` 硬體 SIMD IDCT 搭配 `<arm_neon.h>` 全範圍 BT.601 向量化核心轉入 YUV420 Arena。
+     - **Tier 3（全廠牌現代相機格式通道）**：原生動態載入系統 `libjnigraphics.so` (`NDK AImageDecoder`) 搭配 `<arm_neon.h>` 向量化核心，無縫支援三星「高效圖片」與 iPhone / 小米 / OPPO / Vivo 之 **`HEIC` / `HEIF` (`*.heic`)**、**`AVIF`**、**`PNG` 截圖**、**`WebP`**、**`BMP` / `GIF`**、**`DNG RAW`** 與 **10-bit / Ultra HDR** 相機相片（相容 `RedactingFileDescriptor` 與雲端串流 FD）。
+   - **相簿單張 / 批次自動打碼輸出**：於 YUV420 平面原地完成單應性追蹤對位或學習位置直接套用打碼後，以 `tjCompressFromYUVPlanes` 直壓輸出高品質 `.jpg`，並僅保留最小化 38-byte EXIF `0x0112` Orientation 標籤（自動剝離原始 GPS 與相機序號等隱私欄位）。
 3. **跨廠牌記憶體對齊相容**
    - 顯式處理任意 `yRowStride`、`uRowStride`、`vRowStride`（64 / 128 bytes Padding）與 `ANativeWindow_Buffer.stride`。
    - 自動相容 `uvPixelStride == 1`（`I420` / `YV12` Planar）與 `uvPixelStride == 2`（`NV12` / `NV21` Semi-Planar 交錯記憶體）。

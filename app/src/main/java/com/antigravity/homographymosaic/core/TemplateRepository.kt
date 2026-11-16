@@ -105,7 +105,7 @@ class TemplateRepository(
         if (!tel.success || !tplFile.exists()) {
             tplFile.delete()
             return@withContext Result.failure(
-                IllegalStateException("無法解析所選相片（請確認檔案為標準 JPEG 相片）")
+                IllegalStateException("無法解析所選相片（支援 JPEG / HEIC / HEIF / PNG / WebP / AVIF，請確認檔案未損毀）")
             )
         }
 

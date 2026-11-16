@@ -106,7 +106,7 @@ fun PhotoLearnScreen(
             isErrorStatus = false
         } else {
             headerInfo = null
-            statusMessage = "此檔案非標準 JPEG 相片，請重新選取一張 JPEG 相片作為範例"
+            statusMessage = "無法解析所選影像（支援 JPEG / HEIC / HEIF / PNG / WebP / AVIF，請確認檔案未損毀）"
             isErrorStatus = true
         }
     }
@@ -153,7 +153,7 @@ fun PhotoLearnScreen(
                             color = Color.White
                         )
                         Text(
-                            text = "無須開啟相機。請從相簿選取一張範例相片，直接在欲遮蔽的位置拖曳框選（支援單處或多處），點擊學習後即可對任意選取相片自動在該位置極速打碼。",
+                            text = "無須開啟相機。支援直接選取相機拍攝之全格式相片（JPEG / HEIC / HEIF / PNG / WebP / AVIF），在欲遮蔽的位置拖曳框選（單處或多處），學習後即可自動在該位置極速打碼。",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF94A3B8)
                         )

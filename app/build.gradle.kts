@@ -18,8 +18,8 @@ android {
         applicationId = "com.antigravity.homographymosaic"
         minSdk = 24
         targetSdk = 35
-        versionCode = 210
-        versionName = "2.1.0-FAMTPL02"
+        versionCode = 220
+        versionName = "2.2.0-FAMTPL02"
 
         ndk {
             // Strict cross-vendor ARMv8 & ARMv7 NEON support

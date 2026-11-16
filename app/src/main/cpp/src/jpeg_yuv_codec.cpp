@@ -9,6 +9,10 @@
 #define FAM_CODEC_NEON 0
 #endif
 
+#if defined(__ANDROID__)
+#include <dlfcn.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -103,26 +107,30 @@ using SteadyClock = std::chrono::steady_clock;
     }
 
     if (st.st_size > 0) {
-        outSize = static_cast<size_t>(st.st_size);
-        if (buffer.size() < outSize) {
-            buffer.resize(outSize);
+        const size_t expected = static_cast<size_t>(st.st_size);
+        if (buffer.size() < expected) {
+            buffer.resize(expected);
         }
         size_t totalRead = 0;
-        while (totalRead < outSize) {
-            const ssize_t n = ::pread(fd, buffer.data() + totalRead, outSize - totalRead,
+        bool preadFailed = false;
+        while (totalRead < expected) {
+            const ssize_t n = ::pread(fd, buffer.data() + totalRead, expected - totalRead,
                                       static_cast<off_t>(totalRead));
             if (n < 0) {
                 if (errno == EINTR) continue;
-                return false;
+                preadFailed = true;
+                break;
             }
             if (n == 0) break;
             totalRead += static_cast<size_t>(n);
         }
-        outSize = totalRead;
-        return outSize >= 4;
+        if (!preadFailed && totalRead >= 4) {
+            outSize = totalRead;
+            return true;
+        }
     }
 
-    // Fallback for pipe/stream FDs where st_size == 0
+    // Fallback for pipe/stream/RedactingFileDescriptor/cloud ContentProvider FDs
     (void)::lseek(fd, 0, SEEK_SET);
     outSize = 0;
     constexpr size_t kChunk = 65536;
@@ -139,6 +147,515 @@ using SteadyClock = std::chrono::steady_clock;
         outSize += static_cast<size_t>(n);
     }
     return outSize >= 4;
+}
+
+/**
+ * RAII zero-copy FD mapper with automatic fallback to buffered stream read.
+ * Rejects anomalous all-zero virtual mappings and guarantees mapping lifetime
+ * across multi-tier decoders (libjpeg-turbo and NDK AImageDecoder).
+ */
+struct MappedOrBufferedInput {
+    void* mappedAddr = MAP_FAILED;
+    size_t size = 0;
+    const uint8_t* ptr = nullptr;
+
+    MappedOrBufferedInput() noexcept = default;
+    ~MappedOrBufferedInput() noexcept {
+        if (mappedAddr != MAP_FAILED && mappedAddr != nullptr && size > 0) {
+            ::munmap(mappedAddr, size);
+        }
+    }
+
+    MappedOrBufferedInput(const MappedOrBufferedInput&) = delete;
+    MappedOrBufferedInput& operator=(const MappedOrBufferedInput&) = delete;
+
+    [[nodiscard]] bool load(int fd, std::vector<uint8_t>& fallbackBuf, bool sequentialAdvise = false) {
+        if (fd < 0) {
+            return false;
+        }
+        struct stat st{};
+        if (::fstat(fd, &st) == 0 && st.st_size >= 4) {
+            const size_t candidateSize = static_cast<size_t>(st.st_size);
+            void* m = ::mmap(nullptr, candidateSize, PROT_READ, MAP_PRIVATE, fd, 0);
+            if (m != MAP_FAILED && m != nullptr) {
+                const auto* bytes = static_cast<const uint8_t*>(m);
+                bool anyNonZero = false;
+                const size_t probeLen = std::min<size_t>(candidateSize, 16);
+                for (size_t i = 0; i < probeLen; ++i) {
+                    if (bytes[i] != 0) {
+                        anyNonZero = true;
+                        break;
+                    }
+                }
+                if (anyNonZero) {
+                    if (sequentialAdvise) {
+                        (void)::madvise(m, candidateSize, MADV_SEQUENTIAL);
+                    }
+                    mappedAddr = m;
+                    size = candidateSize;
+                    ptr = bytes;
+                    return true;
+                }
+                ::munmap(m, candidateSize);
+            }
+        }
+
+        if (!readEntireFd(fd, fallbackBuf, size)) {
+            size = 0;
+            ptr = nullptr;
+            return false;
+        }
+        ptr = fallbackBuf.data();
+        return true;
+    }
+
+    [[nodiscard]] std::span<const uint8_t> span() const noexcept {
+        return {ptr, size};
+    }
+};
+
+/**
+ * Converts in-place 4-byte CMYK pixels (inverted Adobe/JPEG convention where 255 = no ink)
+ * into 4-byte RGBA_8888 pixels.
+ */
+void convertCmykToRgbaInPlace(uint8_t* buf, size_t pixelCount) noexcept {
+    for (size_t i = 0; i < pixelCount; ++i) {
+        uint8_t* p = buf + i * 4U;
+        const uint32_t c = p[0];
+        const uint32_t m = p[1];
+        const uint32_t y = p[2];
+        const uint32_t k = p[3];
+        p[0] = static_cast<uint8_t>((c * k + 127U) / 255U);
+        p[1] = static_cast<uint8_t>((m * k + 127U) / 255U);
+        p[2] = static_cast<uint8_t>((y * k + 127U) / 255U);
+        p[3] = 255U;
+    }
+}
+
+/**
+ * Overflow-safe ARM NEON SIMD full-range JFIF BT.601 RGBA_8888 -> planar YUV420 converter.
+ * Used when decoding HEIC/HEIF, PNG, WebP, AVIF, RAW, or non-standard subsampling JPEGs (4:4:0/4:1:1/CMYK).
+ *
+ * Full-range BT.601 integer equations (exact neutral gray R=G=B -> U=128, V=128, zero int16 overflow):
+ *   Y = ( 77*R + 150*G +  29*B + 128) >> 8
+ *   U = ((-43*R -  84*G + 127*B + 128) >> 8) + 128
+ *   V = ((127*R - 106*G -  21*B + 128) >> 8) + 128
+ */
+[[nodiscard]] bool rgbaToYuv420Arena(
+    const uint8_t* rgba,
+    size_t rgbaStride,
+    int32_t width,
+    int32_t height,
+    AlignedYuvArena& outArena) noexcept {
+
+    if (!rgba || width < 16 || height < 16 || rgbaStride < static_cast<size_t>(width) * 4U) {
+        return false;
+    }
+    if (!outArena.ensureLayout(width, height, ChromaSubsampling::YUV420)) {
+        return false;
+    }
+
+    const YuvPlaneView view = outArena.view();
+
+#if FAM_CODEC_NEON
+    const uint8x8_t kYR = vdup_n_u8(77);
+    const uint8x8_t kYG = vdup_n_u8(150);
+    const uint8x8_t kYB = vdup_n_u8(29);
+    const uint16x8_t kYBias = vdupq_n_u16(128);
+
+    const int16x8_t kUR = vdupq_n_s16(-43);
+    const int16x8_t kUG = vdupq_n_s16(-84);
+    const int16x8_t kUB = vdupq_n_s16(127);
+
+    const int16x8_t kVR = vdupq_n_s16(127);
+    const int16x8_t kVG = vdupq_n_s16(-106);
+    const int16x8_t kVB = vdupq_n_s16(-21);
+
+    const int16x8_t kUvRound = vdupq_n_s16(128);
+    const int16x8_t kUvOffset = vdupq_n_s16(128);
+#endif
+
+    for (int32_t y = 0; y < height; y += 2) {
+        const bool hasRow1 = (y + 1 < height);
+        const uint8_t* row0 = rgba + static_cast<size_t>(y) * rgbaStride;
+        const uint8_t* row1 = hasRow1 ? (rgba + static_cast<size_t>(y + 1) * rgbaStride) : row0;
+
+        uint8_t* yOut0 = view.yPtr + static_cast<size_t>(y) * static_cast<size_t>(view.yRowStride);
+        uint8_t* yOut1 = hasRow1
+                             ? (view.yPtr + static_cast<size_t>(y + 1) * static_cast<size_t>(view.yRowStride))
+                             : nullptr;
+        uint8_t* uOut = view.uPtr + static_cast<size_t>(y / 2) * static_cast<size_t>(view.uRowStride);
+        uint8_t* vOut = view.vPtr + static_cast<size_t>(y / 2) * static_cast<size_t>(view.vRowStride);
+
+        int32_t x = 0;
+#if FAM_CODEC_NEON
+        for (; x + 16 <= width; x += 16) {
+            const uint8x16x4_t p0 = vld4q_u8(row0 + static_cast<size_t>(x) * 4U);
+
+            uint16x8_t y0Lo = vmlal_u8(kYBias, vget_low_u8(p0.val[0]), kYR);
+            y0Lo = vmlal_u8(y0Lo, vget_low_u8(p0.val[1]), kYG);
+            y0Lo = vmlal_u8(y0Lo, vget_low_u8(p0.val[2]), kYB);
+
+            uint16x8_t y0Hi = vmlal_u8(kYBias, vget_high_u8(p0.val[0]), kYR);
+            y0Hi = vmlal_u8(y0Hi, vget_high_u8(p0.val[1]), kYG);
+            y0Hi = vmlal_u8(y0Hi, vget_high_u8(p0.val[2]), kYB);
+
+            vst1q_u8(yOut0 + x, vcombine_u8(vshrn_n_u16(y0Lo, 8), vshrn_n_u16(y0Hi, 8)));
+
+            uint8x16x4_t p1 = p0;
+            if (hasRow1) {
+                p1 = vld4q_u8(row1 + static_cast<size_t>(x) * 4U);
+
+                uint16x8_t y1Lo = vmlal_u8(kYBias, vget_low_u8(p1.val[0]), kYR);
+                y1Lo = vmlal_u8(y1Lo, vget_low_u8(p1.val[1]), kYG);
+                y1Lo = vmlal_u8(y1Lo, vget_low_u8(p1.val[2]), kYB);
+
+                uint16x8_t y1Hi = vmlal_u8(kYBias, vget_high_u8(p1.val[0]), kYR);
+                y1Hi = vmlal_u8(y1Hi, vget_high_u8(p1.val[1]), kYG);
+                y1Hi = vmlal_u8(y1Hi, vget_high_u8(p1.val[2]), kYB);
+
+                vst1q_u8(yOut1 + x, vcombine_u8(vshrn_n_u16(y1Lo, 8), vshrn_n_u16(y1Hi, 8)));
+            }
+
+            const uint16x8_t sumR = vpadalq_u8(vpaddlq_u8(p0.val[0]), p1.val[0]);
+            const uint16x8_t sumG = vpadalq_u8(vpaddlq_u8(p0.val[1]), p1.val[1]);
+            const uint16x8_t sumB = vpadalq_u8(vpaddlq_u8(p0.val[2]), p1.val[2]);
+
+            const int16x8_t rAvg = vreinterpretq_s16_u16(vrshrq_n_u16(sumR, 2));
+            const int16x8_t gAvg = vreinterpretq_s16_u16(vrshrq_n_u16(sumG, 2));
+            const int16x8_t bAvg = vreinterpretq_s16_u16(vrshrq_n_u16(sumB, 2));
+
+            int16x8_t uAcc = vmlaq_s16(kUvRound, rAvg, kUR);
+            uAcc = vmlaq_s16(uAcc, gAvg, kUG);
+            uAcc = vmlaq_s16(uAcc, bAvg, kUB);
+            const int16x8_t uVal = vaddq_s16(vshrq_n_s16(uAcc, 8), kUvOffset);
+
+            int16x8_t vAcc = vmlaq_s16(kUvRound, rAvg, kVR);
+            vAcc = vmlaq_s16(vAcc, gAvg, kVG);
+            vAcc = vmlaq_s16(vAcc, bAvg, kVB);
+            const int16x8_t vVal = vaddq_s16(vshrq_n_s16(vAcc, 8), kUvOffset);
+
+            vst1_u8(uOut + (x >> 1), vqmovun_s16(uVal));
+            vst1_u8(vOut + (x >> 1), vqmovun_s16(vVal));
+        }
+#endif
+
+        // Bit-exact scalar tail for remaining columns (including odd widths/heights)
+        for (; x < width; x += 2) {
+            const uint8_t* p00 = row0 + static_cast<size_t>(x) * 4U;
+            const int32_t r00 = p00[0];
+            const int32_t g00 = p00[1];
+            const int32_t b00 = p00[2];
+            yOut0[x] = static_cast<uint8_t>((77 * r00 + 150 * g00 + 29 * b00 + 128) >> 8);
+
+            int32_t r01 = r00;
+            int32_t g01 = g00;
+            int32_t b01 = b00;
+            if (x + 1 < width) {
+                const uint8_t* p01 = row0 + static_cast<size_t>(x + 1) * 4U;
+                r01 = p01[0];
+                g01 = p01[1];
+                b01 = p01[2];
+                yOut0[x + 1] = static_cast<uint8_t>((77 * r01 + 150 * g01 + 29 * b01 + 128) >> 8);
+            }
+
+            int32_t r10 = r00;
+            int32_t g10 = g00;
+            int32_t b10 = b00;
+            int32_t r11 = r01;
+            int32_t g11 = g01;
+            int32_t b11 = b01;
+            if (hasRow1) {
+                const uint8_t* p10 = row1 + static_cast<size_t>(x) * 4U;
+                r10 = p10[0];
+                g10 = p10[1];
+                b10 = p10[2];
+                yOut1[x] = static_cast<uint8_t>((77 * r10 + 150 * g10 + 29 * b10 + 128) >> 8);
+
+                r11 = r10;
+                g11 = g10;
+                b11 = b10;
+                if (x + 1 < width) {
+                    const uint8_t* p11 = row1 + static_cast<size_t>(x + 1) * 4U;
+                    r11 = p11[0];
+                    g11 = p11[1];
+                    b11 = p11[2];
+                    yOut1[x + 1] = static_cast<uint8_t>((77 * r11 + 150 * g11 + 29 * b11 + 128) >> 8);
+                }
+            }
+
+            const int32_t rAvg = (r00 + r01 + r10 + r11 + 2) >> 2;
+            const int32_t gAvg = (g00 + g01 + g10 + g11 + 2) >> 2;
+            const int32_t bAvg = (b00 + b01 + b10 + b11 + 2) >> 2;
+
+            const int32_t uVal = ((-43 * rAvg - 84 * gAvg + 127 * bAvg + 128) >> 8) + 128;
+            const int32_t vVal = ((127 * rAvg - 106 * gAvg - 21 * bAvg + 128) >> 8) + 128;
+
+            uOut[x >> 1] = static_cast<uint8_t>(std::clamp(uVal, 0, 255));
+            vOut[x >> 1] = static_cast<uint8_t>(std::clamp(vVal, 0, 255));
+        }
+    }
+
+    return true;
+}
+
+#if defined(__ANDROID__)
+struct AImageDecoder;
+struct AImageDecoderHeaderInfo;
+
+/**
+ * Dynamic NDK AImageDecoder resolver (`libjnigraphics.so`, API 30+).
+ * Keeps minSdk 24 binary link compatibility while unlocking native zero-Java-Bitmap decoding
+ * for HEIC / HEIF, AVIF, PNG, WebP, BMP, GIF, DNG RAW, and 10-bit/HDR camera photos.
+ */
+struct NdkImageDecoderDynamicApi {
+    using CreateFromFdFn = int (*)(int, AImageDecoder**);
+    using CreateFromBufferFn = int (*)(const void*, size_t, AImageDecoder**);
+    using DeleteFn = void (*)(AImageDecoder*);
+    using GetHeaderInfoFn = const AImageDecoderHeaderInfo* (*)(const AImageDecoder*);
+    using HeaderGetWidthFn = int32_t (*)(const AImageDecoderHeaderInfo*);
+    using HeaderGetHeightFn = int32_t (*)(const AImageDecoderHeaderInfo*);
+    using SetAndroidBitmapFormatFn = int (*)(AImageDecoder*, int32_t);
+    using SetTargetSizeFn = int (*)(AImageDecoder*, int32_t, int32_t);
+    using GetMinimumStrideFn = size_t (*)(AImageDecoder*);
+    using DecodeImageFn = int (*)(AImageDecoder*, void*, size_t, size_t);
+
+    CreateFromFdFn createFromFd = nullptr;
+    CreateFromBufferFn createFromBuffer = nullptr;
+    DeleteFn deleteDecoder = nullptr;
+    GetHeaderInfoFn getHeaderInfo = nullptr;
+    HeaderGetWidthFn getWidth = nullptr;
+    HeaderGetHeightFn getHeight = nullptr;
+    SetAndroidBitmapFormatFn setBitmapFormat = nullptr;
+    SetTargetSizeFn setTargetSize = nullptr;
+    GetMinimumStrideFn getMinStride = nullptr;
+    DecodeImageFn decodeImage = nullptr;
+    bool available = false;
+
+    static const NdkImageDecoderDynamicApi& instance() noexcept {
+        static const NdkImageDecoderDynamicApi api = []() noexcept {
+            NdkImageDecoderDynamicApi res{};
+            void* lib = ::dlopen("libjnigraphics.so", RTLD_LAZY | RTLD_LOCAL);
+            if (!lib) {
+                return res;
+            }
+            res.createFromFd = reinterpret_cast<CreateFromFdFn>(
+                ::dlsym(lib, "AImageDecoder_createFromFd"));
+            res.createFromBuffer = reinterpret_cast<CreateFromBufferFn>(
+                ::dlsym(lib, "AImageDecoder_createFromBuffer"));
+            res.deleteDecoder = reinterpret_cast<DeleteFn>(
+                ::dlsym(lib, "AImageDecoder_delete"));
+            res.getHeaderInfo = reinterpret_cast<GetHeaderInfoFn>(
+                ::dlsym(lib, "AImageDecoder_getHeaderInfo"));
+            res.getWidth = reinterpret_cast<HeaderGetWidthFn>(
+                ::dlsym(lib, "AImageDecoderHeaderInfo_getWidth"));
+            res.getHeight = reinterpret_cast<HeaderGetHeightFn>(
+                ::dlsym(lib, "AImageDecoderHeaderInfo_getHeight"));
+            res.setBitmapFormat = reinterpret_cast<SetAndroidBitmapFormatFn>(
+                ::dlsym(lib, "AImageDecoder_setAndroidBitmapFormat"));
+            res.setTargetSize = reinterpret_cast<SetTargetSizeFn>(
+                ::dlsym(lib, "AImageDecoder_setTargetSize"));
+            res.getMinStride = reinterpret_cast<GetMinimumStrideFn>(
+                ::dlsym(lib, "AImageDecoder_getMinimumStride"));
+            res.decodeImage = reinterpret_cast<DecodeImageFn>(
+                ::dlsym(lib, "AImageDecoder_decodeImage"));
+
+            res.available = res.createFromFd && res.createFromBuffer && res.deleteDecoder &&
+                            res.getHeaderInfo && res.getWidth && res.getHeight &&
+                            res.setBitmapFormat && res.setTargetSize &&
+                            res.getMinStride && res.decodeImage;
+            return res;
+        }();
+        return api;
+    }
+};
+
+[[nodiscard]] AImageDecoder* openNdkImageDecoder(
+    const NdkImageDecoderDynamicApi& api,
+    int inFd,
+    std::span<const uint8_t> fallbackBytes) noexcept {
+
+    AImageDecoder* dec = nullptr;
+    // Prefer createFromFd so Stagefright HeifDecoder uses direct FileSource FD without Binder stream copies
+    if (inFd > 0 && ::lseek(inFd, 0, SEEK_SET) == 0) {
+        if (api.createFromFd(inFd, &dec) != 0) {
+            dec = nullptr;
+        }
+    }
+    if (!dec && fallbackBytes.size() >= 4) {
+        if (api.createFromBuffer(fallbackBytes.data(), fallbackBytes.size(), &dec) != 0) {
+            dec = nullptr;
+        }
+    }
+    return dec;
+}
+#endif
+
+[[nodiscard]] bool inspectViaNdkImageDecoder(
+    int inFd,
+    std::span<const uint8_t> fallbackBytes,
+    JpegHeaderMeta& outMeta) {
+
+#if defined(__ANDROID__)
+    const auto& api = NdkImageDecoderDynamicApi::instance();
+    if (!api.available) {
+        return false;
+    }
+    AImageDecoder* dec = openNdkImageDecoder(api, inFd, fallbackBytes);
+    if (!dec) {
+        return false;
+    }
+
+    const AImageDecoderHeaderInfo* info = api.getHeaderInfo(dec);
+    const int32_t w = info ? api.getWidth(info) : 0;
+    const int32_t h = info ? api.getHeight(info) : 0;
+    api.deleteDecoder(dec);
+
+    if (w < 16 || h < 16) {
+        return false;
+    }
+
+    // AImageDecoder natively applies EXIF / HEIF irot / AVIF orientation to header dimensions
+    outMeta.valid = true;
+    outMeta.rawWidth = w;
+    outMeta.rawHeight = h;
+    outMeta.uprightWidth = w;
+    outMeta.uprightHeight = h;
+    outMeta.exifOrientation = 1;
+    outMeta.errorMessage.clear();
+    return true;
+#else
+    (void)inFd;
+    (void)fallbackBytes;
+    (void)outMeta;
+    return false;
+#endif
+}
+
+[[nodiscard]] bool decodeRgbaViaNdkImageDecoder(
+    int inFd,
+    std::span<const uint8_t> fallbackBytes,
+    int32_t maxDim,
+    std::vector<uint8_t>& outRgbaBytes,
+    size_t& outStrideBytes,
+    int32_t& outWidth,
+    int32_t& outHeight,
+    std::string* errorOut) {
+
+#if defined(__ANDROID__)
+    const auto& api = NdkImageDecoderDynamicApi::instance();
+    if (!api.available) {
+        if (errorOut) *errorOut = "NDK AImageDecoder unavailable (requires Android 11+ for HEIC/PNG/WebP)";
+        return false;
+    }
+
+    AImageDecoder* dec = openNdkImageDecoder(api, inFd, fallbackBytes);
+    if (!dec) {
+        if (errorOut) *errorOut = "AImageDecoder could not recognize image format";
+        return false;
+    }
+
+    const AImageDecoderHeaderInfo* info = api.getHeaderInfo(dec);
+    const int32_t origW = info ? api.getWidth(info) : 0;
+    const int32_t origH = info ? api.getHeight(info) : 0;
+    if (origW < 16 || origH < 16) {
+        api.deleteDecoder(dec);
+        if (errorOut) *errorOut = "Image dimensions smaller than 16x16 minimum";
+        return false;
+    }
+
+    constexpr int32_t kAndroidBitmapFormatRgba8888 = 1;
+    if (api.setBitmapFormat(dec, kAndroidBitmapFormatRgba8888) != 0) {
+        api.deleteDecoder(dec);
+        if (errorOut) *errorOut = "AImageDecoder failed setting RGBA_8888 format";
+        return false;
+    }
+
+    int32_t targetW = origW;
+    int32_t targetH = origH;
+    if (maxDim >= 16 && std::max(origW, origH) > maxDim) {
+        if (origW >= origH) {
+            targetW = maxDim;
+            targetH = std::max<int32_t>(
+                16, static_cast<int32_t>((static_cast<int64_t>(origH) * maxDim + origW / 2) / origW));
+        } else {
+            targetH = maxDim;
+            targetW = std::max<int32_t>(
+                16, static_cast<int32_t>((static_cast<int64_t>(origW) * maxDim + origH / 2) / origH));
+        }
+        if (api.setTargetSize(dec, targetW, targetH) != 0) {
+            api.deleteDecoder(dec);
+            if (errorOut) *errorOut = "AImageDecoder failed setting target dimensions";
+            return false;
+        }
+    }
+
+    const size_t minStride = api.getMinStride(dec);
+    const size_t strideBytes = std::max(minStride, static_cast<size_t>(targetW) * 4U);
+    const size_t totalBytes = strideBytes * static_cast<size_t>(targetH);
+
+    outRgbaBytes.resize(totalBytes);
+    const int rc = api.decodeImage(dec, outRgbaBytes.data(), strideBytes, totalBytes);
+    api.deleteDecoder(dec);
+
+    if (rc != 0) {
+        if (errorOut) *errorOut = "AImageDecoder_decodeImage failed";
+        return false;
+    }
+
+    outStrideBytes = strideBytes;
+    outWidth = targetW;
+    outHeight = targetH;
+    return true;
+#else
+    (void)inFd;
+    (void)fallbackBytes;
+    (void)maxDim;
+    (void)outRgbaBytes;
+    (void)outStrideBytes;
+    (void)outWidth;
+    (void)outHeight;
+    if (errorOut) *errorOut = "Non-JPEG decoding requires Android NDK AImageDecoder";
+    return false;
+#endif
+}
+
+[[nodiscard]] tjscalingfactor chooseTurboJpegScalingFactor(
+    int rawW, int rawH, int32_t maxDim) noexcept {
+
+    if (maxDim <= 0 || std::max(rawW, rawH) <= maxDim) {
+        return TJUNSCALED;
+    }
+
+    int numFactors = 0;
+    const tjscalingfactor* factors = tj3GetScalingFactors(&numFactors);
+    if (!factors || numFactors <= 0) {
+        return TJUNSCALED;
+    }
+
+    tjscalingfactor bestLe = {0, 1};
+    int bestLeMax = 0;
+    tjscalingfactor smallest = TJUNSCALED;
+    int smallestMax = std::max(rawW, rawH);
+
+    for (int i = 0; i < numFactors; ++i) {
+        if (factors[i].num > factors[i].denom) {
+            continue; // Never upscale beyond 1/1
+        }
+        const int candW = TJSCALED(rawW, factors[i]);
+        const int candH = TJSCALED(rawH, factors[i]);
+        const int candMax = std::max(candW, candH);
+        if (candMax < smallestMax && candW >= 16 && candH >= 16) {
+            smallestMax = candMax;
+            smallest = factors[i];
+        }
+        if (candMax <= maxDim && candMax > bestLeMax && candW >= 16 && candH >= 16) {
+            bestLeMax = candMax;
+            bestLe = factors[i];
+        }
+    }
+
+    return (bestLeMax > 0) ? bestLe : smallest;
 }
 
 [[nodiscard]] bool writeJpegWithOptionalExifToFd(
@@ -457,64 +974,123 @@ bool JpegYuvCodec::decodeToYuvPlanes(
     std::span<const uint8_t> jpegBytes,
     AlignedYuvArena& outArena,
     uint16_t* outExifOrientation,
-    std::string* errorOut) {
+    std::string* errorOut,
+    int optionalInFd) {
 
-    if (!tjDecompressor_ || jpegBytes.size() < 4) {
-        if (errorOut) *errorOut = "Invalid TurboJPEG decompressor or empty JPEG input";
+    if (!tjDecompressor_ || (jpegBytes.size() < 4 && optionalInFd < 0)) {
+        if (errorOut) *errorOut = "Invalid TurboJPEG decompressor or empty image input";
         return false;
     }
 
-    if (outExifOrientation) {
-        *outExifOrientation = parseExifOrientation(jpegBytes);
-    }
+    auto* tj = static_cast<tjhandle>(tjDecompressor_);
+    (void)tj3SetScalingFactor(tj, TJUNSCALED);
 
-    int width = 0;
-    int height = 0;
-    int jpegSubsamp = TJSAMP_420;
-    int jpegColorspace = TJCS_YCbCr;
-    if (tjDecompressHeader3(
-            static_cast<tjhandle>(tjDecompressor_),
-            jpegBytes.data(),
-            static_cast<unsigned long>(jpegBytes.size()),
-            &width, &height, &jpegSubsamp, &jpegColorspace) != 0) {
-        if (errorOut) {
-            *errorOut = std::string("tjDecompressHeader3 failed: ") +
-                        tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
+    // Tier 1 & Tier 2: libjpeg-turbo 3.0+ SIMD fast paths for all 8-bit JPEGs
+    if (jpegBytes.size() >= 4 && jpegBytes[0] == 0xFF && jpegBytes[1] == 0xD8 &&
+        tj3DecompressHeader(tj, jpegBytes.data(), jpegBytes.size()) == 0) {
+
+        const int precision = tj3Get(tj, TJPARAM_PRECISION);
+        const int rawW = tj3Get(tj, TJPARAM_JPEGWIDTH);
+        const int rawH = tj3Get(tj, TJPARAM_JPEGHEIGHT);
+        const int jpegSubsamp = tj3Get(tj, TJPARAM_SUBSAMP);
+        const int jpegColorspace = tj3Get(tj, TJPARAM_COLORSPACE);
+
+        if (precision == 8 && rawW >= 16 && rawH >= 16) {
+            const uint16_t jpegOrient = parseExifOrientation(jpegBytes);
+
+            // Tier 1: Direct zero-RGB YUV plane decode (4:2:0, 4:2:2, 4:4:4, Grayscale)
+            ChromaSubsampling subsampling = ChromaSubsampling::YUV420;
+            if ((jpegColorspace == TJCS_YCbCr || jpegColorspace == TJCS_GRAY) &&
+                fromTjSubsamp(jpegSubsamp, subsampling) &&
+                std::max(rawW, rawH) <= 8192) {
+
+                if (outArena.ensureLayout(rawW, rawH, subsampling)) {
+                    const YuvPlaneView v = outArena.view();
+                    unsigned char* dstPlanes[3] = {v.yPtr, v.uPtr, v.vPtr};
+                    int strides[3] = {v.yRowStride, v.uRowStride, v.vRowStride};
+
+                    if (tjDecompressToYUVPlanes(
+                            tj,
+                            jpegBytes.data(),
+                            static_cast<unsigned long>(jpegBytes.size()),
+                            dstPlanes,
+                            rawW,
+                            strides,
+                            rawH,
+                            TJFLAG_FASTDCT | TJFLAG_FASTUPSAMPLE) == 0) {
+                        if (outExifOrientation) {
+                            *outExifOrientation = jpegOrient;
+                        }
+                        return true;
+                    }
+                }
+            }
+
+            // Tier 2: Universal 8-bit JPEG fallback (4:4:0, 4:1:1, 4:4:1, TJSAMP_UNKNOWN, RGB, CMYK, >8192px)
+            const tjscalingfactor factor = chooseTurboJpegScalingFactor(rawW, rawH, 4096);
+            (void)tj3Set(tj, TJPARAM_FASTDCT, 1);
+            (void)tj3Set(tj, TJPARAM_FASTUPSAMPLE, 1);
+            (void)tj3SetScalingFactor(tj, factor);
+
+            const int scaledW = std::max(16, TJSCALED(rawW, factor));
+            const int scaledH = std::max(16, TJSCALED(rawH, factor));
+            const bool isCmyk = (jpegColorspace == TJCS_CMYK || jpegColorspace == TJCS_YCCK);
+
+            std::vector<uint8_t> rgbaBuf(
+                static_cast<size_t>(scaledW) * static_cast<size_t>(scaledH) * 4U);
+            const int decRc = tj3Decompress8(
+                tj,
+                jpegBytes.data(),
+                jpegBytes.size(),
+                rgbaBuf.data(),
+                scaledW * 4,
+                isCmyk ? TJPF_CMYK : TJPF_RGBA);
+            (void)tj3SetScalingFactor(tj, TJUNSCALED);
+
+            if (decRc == 0) {
+                if (isCmyk) {
+                    convertCmykToRgbaInPlace(
+                        rgbaBuf.data(),
+                        static_cast<size_t>(scaledW) * static_cast<size_t>(scaledH));
+                }
+                if (rgbaToYuv420Arena(
+                        rgbaBuf.data(),
+                        static_cast<size_t>(scaledW) * 4U,
+                        scaledW,
+                        scaledH,
+                        outArena)) {
+                    if (outExifOrientation) {
+                        *outExifOrientation = jpegOrient;
+                    }
+                    return true;
+                }
+            }
         }
-        return false;
     }
 
-    ChromaSubsampling subsampling = ChromaSubsampling::YUV420;
-    if (!fromTjSubsamp(jpegSubsamp, subsampling)) {
-        if (errorOut) *errorOut = "Unsupported JPEG chroma subsampling mode";
-        return false;
-    }
-
-    if (!outArena.ensureLayout(width, height, subsampling)) {
-        if (errorOut) *errorOut = "Failed allocating 64-byte aligned YUV plane arena";
-        return false;
-    }
-
-    const YuvPlaneView v = outArena.view();
-    unsigned char* dstPlanes[3] = {v.yPtr, v.uPtr, v.vPtr};
-    int strides[3] = {v.yRowStride, v.uRowStride, v.vRowStride};
-
-    if (tjDecompressToYUVPlanes(
-            static_cast<tjhandle>(tjDecompressor_),
-            jpegBytes.data(),
-            static_cast<unsigned long>(jpegBytes.size()),
-            dstPlanes,
-            width,
-            strides,
-            height,
-            TJFLAG_FASTDCT | TJFLAG_FASTUPSAMPLE) != 0) {
-        if (errorOut) {
-            *errorOut = std::string("tjDecompressToYUVPlanes failed: ") +
-                        tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
+    // Tier 3: NDK AImageDecoder + ARM NEON BT.601 YUV420 (HEIC/HEIF, PNG, WebP, AVIF, BMP, GIF, RAW, 10-bit)
+    std::vector<uint8_t> decodedRgba;
+    size_t rgbaStride = 0;
+    int32_t decW = 0;
+    int32_t decH = 0;
+    if (decodeRgbaViaNdkImageDecoder(
+            optionalInFd, jpegBytes, 4096,
+            decodedRgba, rgbaStride, decW, decH, errorOut)) {
+        if (rgbaToYuv420Arena(decodedRgba.data(), rgbaStride, decW, decH, outArena)) {
+            if (outExifOrientation) {
+                // AImageDecoder outputs pixels already oriented upright
+                *outExifOrientation = 1;
+            }
+            return true;
         }
+        if (errorOut) *errorOut = "Failed allocating YUV420 arena for decoded image";
         return false;
     }
-    return true;
+
+    if (errorOut && errorOut->empty()) {
+        *errorOut = "Unsupported or corrupted image file";
+    }
+    return false;
 }
 
 bool JpegYuvCodec::encodeFromYuvView(
@@ -542,7 +1118,7 @@ bool JpegYuvCodec::encodeFromYuvView(
             strides[1] = frame.uRowStride;
             strides[2] = frame.vRowStride;
         } else {
-            // CameraX semi-planar NV12/NV21 -> NEON vld2q_u8 de-interleave into planar UV scratch
+            // Semi-planar NV12/NV21 -> NEON vld2q_u8 de-interleave into planar UV scratch
             const int32_t cw = (frame.subsampling == ChromaSubsampling::YUV444)
                                    ? frame.width
                                    : (frame.width + 1) / 2;
@@ -691,59 +1267,48 @@ JpegHeaderMeta JpegYuvCodec::inspectFd(int inFd) {
         return meta;
     }
 
-    struct stat st{};
-    void* mappedIn = MAP_FAILED;
-    size_t inputBytes = 0;
-    const uint8_t* inputPtr = nullptr;
-
-    if (::fstat(inFd, &st) == 0 && st.st_size >= 4) {
-        inputBytes = static_cast<size_t>(st.st_size);
-        mappedIn = ::mmap(nullptr, inputBytes, PROT_READ, MAP_PRIVATE, inFd, 0);
-        if (mappedIn != MAP_FAILED) {
-            inputPtr = static_cast<const uint8_t*>(mappedIn);
-        }
-    }
-
-    if (!inputPtr) {
-        if (!readEntireFd(inFd, streamFallbackBuf_, inputBytes)) {
-            meta.errorMessage = "Failed reading JPEG header from FD";
+    MappedOrBufferedInput input;
+    if (!input.load(inFd, streamFallbackBuf_, false)) {
+        // Even if full read failed, give AImageDecoder FD path one chance before reporting failure
+        if (inspectViaNdkImageDecoder(inFd, {}, meta)) {
             return meta;
         }
-        inputPtr = streamFallbackBuf_.data();
-    }
-
-    meta.exifOrientation = parseExifOrientation({inputPtr, inputBytes});
-
-    int w = 0;
-    int h = 0;
-    int subsamp = TJSAMP_420;
-    int cs = TJCS_YCbCr;
-    const int rc = tjDecompressHeader3(
-        static_cast<tjhandle>(tjDecompressor_),
-        inputPtr,
-        static_cast<unsigned long>(inputBytes),
-        &w, &h, &subsamp, &cs);
-
-    if (mappedIn != MAP_FAILED) {
-        ::munmap(mappedIn, inputBytes);
-    }
-
-    if (rc != 0 || w < 16 || h < 16) {
-        meta.errorMessage = std::string("tjDecompressHeader3 failed: ") +
-                            tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
+        meta.errorMessage = "Failed reading image header from FD";
         return meta;
     }
 
-    meta.valid = true;
-    meta.rawWidth = w;
-    meta.rawHeight = h;
-    if (meta.exifOrientation >= 5 && meta.exifOrientation <= 8) {
-        meta.uprightWidth = h;
-        meta.uprightHeight = w;
-    } else {
-        meta.uprightWidth = w;
-        meta.uprightHeight = h;
+    auto* tj = static_cast<tjhandle>(tjDecompressor_);
+    const auto bytes = input.span();
+
+    if (bytes.size() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 &&
+        tj3DecompressHeader(tj, bytes.data(), bytes.size()) == 0) {
+
+        const int precision = tj3Get(tj, TJPARAM_PRECISION);
+        const int w = tj3Get(tj, TJPARAM_JPEGWIDTH);
+        const int h = tj3Get(tj, TJPARAM_JPEGHEIGHT);
+
+        if (precision == 8 && w >= 16 && h >= 16) {
+            meta.valid = true;
+            meta.exifOrientation = parseExifOrientation(bytes);
+            meta.rawWidth = w;
+            meta.rawHeight = h;
+            if (meta.exifOrientation >= 5 && meta.exifOrientation <= 8) {
+                meta.uprightWidth = h;
+                meta.uprightHeight = w;
+            } else {
+                meta.uprightWidth = w;
+                meta.uprightHeight = h;
+            }
+            return meta;
+        }
     }
+
+    // Fallback to NDK AImageDecoder for HEIC/HEIF, PNG, WebP, AVIF, BMP, GIF, RAW, or 10-bit/12-bit JPEG
+    if (inspectViaNdkImageDecoder(inFd, bytes, meta)) {
+        return meta;
+    }
+
+    meta.errorMessage = "Unsupported or corrupted image format";
     return meta;
 }
 
@@ -761,35 +1326,12 @@ LearnResult JpegYuvCodec::learnTemplateFromFd(
         return res;
     }
 
-    struct stat st{};
-    void* mappedIn = MAP_FAILED;
-    size_t inputBytes = 0;
-    const uint8_t* inputPtr = nullptr;
-
-    if (::fstat(inFd, &st) == 0 && st.st_size >= 4) {
-        inputBytes = static_cast<size_t>(st.st_size);
-        mappedIn = ::mmap(nullptr, inputBytes, PROT_READ, MAP_PRIVATE, inFd, 0);
-        if (mappedIn != MAP_FAILED) {
-            (void)::madvise(mappedIn, inputBytes, MADV_SEQUENTIAL);
-            inputPtr = static_cast<const uint8_t*>(mappedIn);
-        }
-    }
-
-    if (!inputPtr) {
-        if (!readEntireFd(inFd, streamFallbackBuf_, inputBytes)) {
-            res.errorMessage = "Failed reading reference JPEG FD";
-            return res;
-        }
-        inputPtr = streamFallbackBuf_.data();
-    }
+    MappedOrBufferedInput input;
+    (void)input.load(inFd, streamFallbackBuf_, true);
 
     std::string err;
     uint16_t exifOrientation = 1;
-    const bool decOk = decodeToYuvPlanes({inputPtr, inputBytes}, arena_, &exifOrientation, &err);
-    if (mappedIn != MAP_FAILED) {
-        ::munmap(mappedIn, inputBytes);
-    }
-    if (!decOk) {
+    if (!decodeToYuvPlanes(input.span(), arena_, &exifOrientation, &err, inFd)) {
         res.errorMessage = err;
         return res;
     }
@@ -839,131 +1381,113 @@ bool JpegYuvCodec::decodePreviewRgbaFromFd(
         return false;
     }
 
-    struct stat st{};
-    void* mappedIn = MAP_FAILED;
-    size_t inputBytes = 0;
-    const uint8_t* inputPtr = nullptr;
-
-    if (::fstat(inFd, &st) == 0 && st.st_size >= 4) {
-        inputBytes = static_cast<size_t>(st.st_size);
-        mappedIn = ::mmap(nullptr, inputBytes, PROT_READ, MAP_PRIVATE, inFd, 0);
-        if (mappedIn != MAP_FAILED) {
-            inputPtr = static_cast<const uint8_t*>(mappedIn);
-        }
-    }
-
-    if (!inputPtr) {
-        if (!readEntireFd(inFd, streamFallbackBuf_, inputBytes)) {
-            if (errorOut) *errorOut = "Failed reading preview JPEG FD";
-            return false;
-        }
-        inputPtr = streamFallbackBuf_.data();
-    }
-
-    const uint16_t orient = parseExifOrientation({inputPtr, inputBytes});
-    int rawW = 0;
-    int rawH = 0;
-    int subsamp = TJSAMP_420;
-    int cs = TJCS_YCbCr;
-    if (tjDecompressHeader3(
-            static_cast<tjhandle>(tjDecompressor_),
-            inputPtr,
-            static_cast<unsigned long>(inputBytes),
-            &rawW, &rawH, &subsamp, &cs) != 0 ||
-        rawW < 16 || rawH < 16) {
-        if (mappedIn != MAP_FAILED) ::munmap(mappedIn, inputBytes);
-        if (errorOut) {
-            *errorOut = std::string("tjDecompressHeader3 failed: ") +
-                        tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
-        }
-        return false;
-    }
-
-    // Choose hardware-SIMD IDCT scaling factor (1/1 .. 1/8) so even 108MP/200MP JPEGs stay < 13 MB
+    MappedOrBufferedInput input;
+    (void)input.load(inFd, streamFallbackBuf_, false);
+    const auto bytes = input.span();
     const int32_t targetMax = std::clamp(maxPreviewDim, 320, 2048);
-    int numFactors = 0;
-    const tjscalingfactor* factors = tjGetScalingFactors(&numFactors);
-    int scaledW = rawW;
-    int scaledH = rawH;
 
-    if (factors && numFactors > 0) {
-        int bestLeW = 0;
-        int bestLeH = 0;
-        int minCandW = rawW;
-        int minCandH = rawH;
+    auto* tj = static_cast<tjhandle>(tjDecompressor_);
+    (void)tj3SetScalingFactor(tj, TJUNSCALED);
 
-        for (int i = 0; i < numFactors; ++i) {
-            if (factors[i].num > factors[i].denom) continue; // Never upscale > 1/1
-            const int candW = TJSCALED(rawW, factors[i]);
-            const int candH = TJSCALED(rawH, factors[i]);
-            const int candMax = std::max(candW, candH);
-            if (candMax < std::max(minCandW, minCandH)) {
-                minCandW = candW;
-                minCandH = candH;
-            }
-            if (candMax <= targetMax && candMax > std::max(bestLeW, bestLeH)) {
-                bestLeW = candW;
-                bestLeH = candH;
+    // Fast Path: Hardware-SIMD IDCT scaled decode via libjpeg-turbo 3.0+ for all 8-bit JPEGs
+    if (bytes.size() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 &&
+        tj3DecompressHeader(tj, bytes.data(), bytes.size()) == 0) {
+
+        const int precision = tj3Get(tj, TJPARAM_PRECISION);
+        const int rawW = tj3Get(tj, TJPARAM_JPEGWIDTH);
+        const int rawH = tj3Get(tj, TJPARAM_JPEGHEIGHT);
+        const int cs = tj3Get(tj, TJPARAM_COLORSPACE);
+
+        if (precision == 8 && rawW >= 16 && rawH >= 16) {
+            const uint16_t orient = parseExifOrientation(bytes);
+            const tjscalingfactor factor = chooseTurboJpegScalingFactor(rawW, rawH, targetMax);
+
+            (void)tj3Set(tj, TJPARAM_FASTDCT, 1);
+            (void)tj3Set(tj, TJPARAM_FASTUPSAMPLE, 1);
+            (void)tj3SetScalingFactor(tj, factor);
+
+            const int scaledW = std::max(16, TJSCALED(rawW, factor));
+            const int scaledH = std::max(16, TJSCALED(rawH, factor));
+            const bool isCmyk = (cs == TJCS_CMYK || cs == TJCS_YCCK);
+
+            std::vector<uint32_t> rawRgba(
+                static_cast<size_t>(scaledW) * static_cast<size_t>(scaledH));
+            const int rc = tj3Decompress8(
+                tj,
+                bytes.data(),
+                bytes.size(),
+                reinterpret_cast<unsigned char*>(rawRgba.data()),
+                scaledW * 4,
+                isCmyk ? TJPF_CMYK : TJPF_RGBA);
+            (void)tj3SetScalingFactor(tj, TJUNSCALED);
+
+            if (rc == 0) {
+                if (isCmyk) {
+                    convertCmykToRgbaInPlace(
+                        reinterpret_cast<uint8_t*>(rawRgba.data()),
+                        rawRgba.size());
+                }
+
+                if (orient == 1) {
+                    outUprightWidth = scaledW;
+                    outUprightHeight = scaledH;
+                    outUprightRgba = std::move(rawRgba);
+                    return true;
+                }
+
+                const bool swapAxes = (orient >= 5 && orient <= 8);
+                const int32_t upW = swapAxes ? scaledH : scaledW;
+                const int32_t upH = swapAxes ? scaledW : scaledH;
+                outUprightWidth = upW;
+                outUprightHeight = upH;
+                outUprightRgba.resize(static_cast<size_t>(upW) * static_cast<size_t>(upH));
+
+                for (int32_t uy = 0; uy < upH; ++uy) {
+                    uint32_t* dstRow = outUprightRgba.data() + static_cast<size_t>(uy) * upW;
+                    for (int32_t ux = 0; ux < upW; ++ux) {
+                        int32_t rx = ux;
+                        int32_t ry = uy;
+                        switch (orient) {
+                            case 2: rx = (scaledW - 1) - ux; ry = uy; break;
+                            case 3: rx = (scaledW - 1) - ux; ry = (scaledH - 1) - uy; break;
+                            case 4: rx = ux;                 ry = (scaledH - 1) - uy; break;
+                            case 5: rx = uy;                 ry = ux; break;
+                            case 6: rx = uy;                 ry = (scaledH - 1) - ux; break;
+                            case 7: rx = (scaledW - 1) - uy; ry = (scaledH - 1) - ux; break;
+                            case 8: rx = (scaledW - 1) - uy; ry = ux; break;
+                            default: break;
+                        }
+                        dstRow[ux] = rawRgba[static_cast<size_t>(ry) * scaledW + rx];
+                    }
+                }
+                return true;
             }
         }
-        scaledW = std::max(16, bestLeW > 0 ? bestLeW : minCandW);
-        scaledH = std::max(16, bestLeH > 0 ? bestLeH : minCandH);
     }
 
-    std::vector<uint32_t> rawRgba(static_cast<size_t>(scaledW) * static_cast<size_t>(scaledH));
-    const int rc = tjDecompress2(
-        static_cast<tjhandle>(tjDecompressor_),
-        inputPtr,
-        static_cast<unsigned long>(inputBytes),
-        reinterpret_cast<unsigned char*>(rawRgba.data()),
-        scaledW,
-        scaledW * 4,
-        scaledH,
-        TJPF_RGBA,
-        TJFLAG_FASTDCT);
-
-    if (mappedIn != MAP_FAILED) {
-        ::munmap(mappedIn, inputBytes);
-    }
-
-    if (rc != 0) {
-        if (errorOut) {
-            *errorOut = std::string("tjDecompress2 preview failed: ") +
-                        tjGetErrorStr2(static_cast<tjhandle>(tjDecompressor_));
-        }
+    // Fallback: NDK AImageDecoder scaled upright preview for HEIC/HEIF, PNG, WebP, AVIF, BMP, GIF, RAW
+    std::vector<uint8_t> rgbaBytes;
+    size_t strideBytes = 0;
+    int32_t decW = 0;
+    int32_t decH = 0;
+    if (!decodeRgbaViaNdkImageDecoder(
+            inFd, bytes, targetMax, rgbaBytes, strideBytes, decW, decH, errorOut)) {
         return false;
     }
 
-    if (orient == 1) {
-        outUprightWidth = scaledW;
-        outUprightHeight = scaledH;
-        outUprightRgba = std::move(rawRgba);
-        return true;
-    }
+    outUprightWidth = decW;
+    outUprightHeight = decH;
+    outUprightRgba.resize(static_cast<size_t>(decW) * static_cast<size_t>(decH));
 
-    const bool swapAxes = (orient >= 5 && orient <= 8);
-    const int32_t upW = swapAxes ? scaledH : scaledW;
-    const int32_t upH = swapAxes ? scaledW : scaledH;
-    outUprightWidth = upW;
-    outUprightHeight = upH;
-    outUprightRgba.resize(static_cast<size_t>(upW) * static_cast<size_t>(upH));
-
-    for (int32_t uy = 0; uy < upH; ++uy) {
-        uint32_t* dstRow = outUprightRgba.data() + static_cast<size_t>(uy) * upW;
-        for (int32_t ux = 0; ux < upW; ++ux) {
-            int32_t rx = ux;
-            int32_t ry = uy;
-            switch (orient) {
-                case 2: rx = (scaledW - 1) - ux; ry = uy; break;
-                case 3: rx = (scaledW - 1) - ux; ry = (scaledH - 1) - uy; break;
-                case 4: rx = ux;                 ry = (scaledH - 1) - uy; break;
-                case 5: rx = uy;                 ry = ux; break;
-                case 6: rx = uy;                 ry = (scaledH - 1) - ux; break;
-                case 7: rx = (scaledW - 1) - uy; ry = (scaledH - 1) - ux; break;
-                case 8: rx = (scaledW - 1) - uy; ry = ux; break;
-                default: break;
-            }
-            dstRow[ux] = rawRgba[static_cast<size_t>(ry) * scaledW + rx];
+    const size_t rowBytes = static_cast<size_t>(decW) * sizeof(uint32_t);
+    if (strideBytes == rowBytes) {
+        std::memcpy(outUprightRgba.data(), rgbaBytes.data(), rowBytes * static_cast<size_t>(decH));
+    } else {
+        for (int32_t y = 0; y < decH; ++y) {
+            std::memcpy(
+                outUprightRgba.data() + static_cast<size_t>(y) * static_cast<size_t>(decW),
+                rgbaBytes.data() + static_cast<size_t>(y) * strideBytes,
+                rowBytes);
         }
     }
     return true;
@@ -979,36 +1503,19 @@ JpegBatchTelemetry JpegYuvCodec::processFdToFd(
     const auto tTotal = SteadyClock::now();
     JpegBatchTelemetry tel{};
 
-    // Step 1: Zero-copy mmap source JPEG FD (fallback to stream read only if non-mmapable)
+    if (inFd < 0 || outFd < 0) {
+        tel.message = "Invalid input or output FD";
+        return tel;
+    }
+
+    // Step 1: Zero-copy mmap source photo FD (or stream/FD decode for HEIC/PNG/WebP/Cloud FDs)
     const auto tDec = SteadyClock::now();
-    struct stat st{};
-    void* mappedIn = MAP_FAILED;
-    size_t inputBytes = 0;
-    const uint8_t* inputPtr = nullptr;
-
-    if (inFd >= 0 && ::fstat(inFd, &st) == 0 && st.st_size >= 4) {
-        inputBytes = static_cast<size_t>(st.st_size);
-        mappedIn = ::mmap(nullptr, inputBytes, PROT_READ, MAP_PRIVATE, inFd, 0);
-        if (mappedIn != MAP_FAILED) {
-            (void)::madvise(mappedIn, inputBytes, MADV_SEQUENTIAL);
-            inputPtr = static_cast<const uint8_t*>(mappedIn);
-        }
-    }
-
-    if (!inputPtr) {
-        if (!readEntireFd(inFd, streamFallbackBuf_, inputBytes)) {
-            tel.message = "Failed reading source JPEG FD";
-            return tel;
-        }
-        inputPtr = streamFallbackBuf_.data();
-    }
+    MappedOrBufferedInput input;
+    (void)input.load(inFd, streamFallbackBuf_, true);
 
     std::string err;
     uint16_t exifOrientation = 1;
-    const bool decOk = decodeToYuvPlanes({inputPtr, inputBytes}, arena_, &exifOrientation, &err);
-    if (mappedIn != MAP_FAILED) {
-        ::munmap(mappedIn, inputBytes);
-    }
+    const bool decOk = decodeToYuvPlanes(input.span(), arena_, &exifOrientation, &err, inFd);
     if (!decOk) {
         tel.message = err;
         return tel;

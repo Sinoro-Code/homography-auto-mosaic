@@ -5,6 +5,7 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <turbojpeg.h>
 
 #include <cmath>
 #include <cstdio>
@@ -529,6 +530,57 @@ int main() {
         ::unlink(tgtExifPath.c_str());
         ::unlink(outExifPath.c_str());
         ::unlink(posTplPath.c_str());
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. Tier-2 Non-Standard ISP Subsampling (TJSAMP_440) & Pipe Stream FD Test
+    // -------------------------------------------------------------------------
+    {
+        const cv::Mat gray440 = createSyntheticDocumentScene(640, 480);
+        cv::Mat rgb440;
+        cv::cvtColor(gray440, rgb440, cv::COLOR_GRAY2RGB);
+
+        tjhandle tjComp = tj3Init(TJINIT_COMPRESS);
+        FAM_REQUIRE(tjComp != nullptr, "tj3Init(TJINIT_COMPRESS) failed");
+        FAM_REQUIRE(tj3Set(tjComp, TJPARAM_SUBSAMP, TJSAMP_440) == 0, "Set TJSAMP_440 failed");
+        FAM_REQUIRE(tj3Set(tjComp, TJPARAM_QUALITY, 90) == 0, "Set quality failed");
+
+        unsigned char* jpeg440 = nullptr;
+        size_t jpeg440Bytes = 0;
+        FAM_REQUIRE(
+            tj3Compress8(tjComp, rgb440.ptr<uint8_t>(0), rgb440.cols,
+                         static_cast<int>(rgb440.step), rgb440.rows,
+                         TJPF_RGB, &jpeg440, &jpeg440Bytes) == 0,
+            "tj3Compress8 TJSAMP_440 failed");
+        tj3Destroy(tjComp);
+
+        // Write into a non-mmapable, non-seekable POSIX pipe FD
+        int pipeFds[2] = {-1, -1};
+        FAM_REQUIRE(::pipe(pipeFds) == 0 && jpeg440Bytes < 60000, "pipe() creation failed");
+        FAM_REQUIRE(
+            ::write(pipeFds[1], jpeg440, jpeg440Bytes) == static_cast<ssize_t>(jpeg440Bytes),
+            "pipe write failed");
+        ::close(pipeFds[1]);
+
+        fam::JpegYuvCodec codec;
+        const std::string out440Path = "/tmp/test_440_pipe_out.jpg";
+        const int out440Fd = ::open(out440Path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        FAM_REQUIRE(out440Fd >= 0, "Failed opening 440 output FD");
+
+        const fam::JpegBatchTelemetry tel440 =
+            codec.processFdToFd(engine, pipeFds[0], out440Fd, 90, 16);
+        ::close(pipeFds[0]);
+        ::close(out440Fd);
+        tjFree(jpeg440);
+        ::unlink(out440Path.c_str());
+
+        std::printf("[Test 6 - TJSAMP_440 + Non-Seekable Pipe FD] ioSuccess=%d, matched=%d, %dx%d\n",
+                    tel440.ioSuccess ? 1 : 0,
+                    tel440.matchedAny ? 1 : 0,
+                    tel440.width,
+                    tel440.height);
+        FAM_REQUIRE(tel440.ioSuccess && tel440.width == 640 && tel440.height == 480,
+                    "Tier-2 TJSAMP_440 + pipe FD decode/encode failed");
     }
 
     ::unlink(tplPath.c_str());
