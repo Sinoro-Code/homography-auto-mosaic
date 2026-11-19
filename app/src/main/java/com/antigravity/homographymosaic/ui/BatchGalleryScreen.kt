@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddCircleOutline
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FolderSpecial
@@ -101,9 +100,6 @@ fun BatchGalleryScreen(
     var isProcessing by remember { mutableStateOf(false) }
     var completedCount by remember { mutableIntStateOf(0) }
     var totalSelectedCount by remember { mutableIntStateOf(0) }
-    var summaryHeadline by remember {
-        mutableStateOf("支援相機全格式相片（JPEG / HEIC / HEIF / PNG / WebP / AVIF），選取即自動在已學習位置完成打碼並存入相簿")
-    }
     val reports = remember { mutableStateListOf<BatchItemReport>() }
 
     fun launchFdBatch(uris: List<Uri>) {
@@ -114,10 +110,6 @@ fun BatchGalleryScreen(
         reports.clear()
 
         scope.launch {
-            val tBatchStartNs = System.nanoTime()
-            var matchedPhotos = 0
-            var maxPeakBytes = 0L
-
             for ((idx, srcUri) in uris.withIndex()) {
                 val report = processSingleUriFdToFd(
                     context = context,
@@ -127,19 +119,10 @@ fun BatchGalleryScreen(
                     jpegQuality = jpegQuality,
                     blockSize = blockSize
                 )
-                if (report.telemetry.matchedAny) matchedPhotos++
-                if (report.telemetry.peakBufferBytes > maxPeakBytes) {
-                    maxPeakBytes = report.telemetry.peakBufferBytes
-                }
                 reports.add(0, report)
                 completedCount = idx + 1
             }
 
-            val wallMs = (System.nanoTime() - tBatchStartNs) / 1_000_000.0
-            val peakMb = maxPeakBytes / (1024.0 * 1024.0)
-            summaryHeadline =
-                "已完成 ${uris.size} 張（打碼 $matchedPhotos 張）· 總耗時 ${"%.1f".format(wallMs)} ms · " +
-                    "峰值 ${"%.1f".format(peakMb)} MB · 已存入相簿 HomographyMosaic"
             isProcessing = false
         }
     }
@@ -179,63 +162,35 @@ fun BatchGalleryScreen(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.Bolt,
-                            contentDescription = null,
-                            tint = Color(0xFF00E5A3)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "選取相片自動打碼（啟用位置: $activeCount）",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-
-                    Text(
-                        text = summaryHeadline,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF94A3B8)
-                    )
-
                     // Alignment Mode selector (Homography + Fixed Position vs Strict Homography only)
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = "位置套用模式:",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color(0xFFCBD5E1)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = fallbackToFixedPosition,
+                            onClick = {
+                                onFallbackToFixedPositionChange(true)
+                                engineSession.updateParameters(fallbackToFixedPosition = true)
+                            },
+                            label = { Text("自動追蹤 + 固定位置 (推薦)") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF00E5A3).copy(alpha = 0.22f),
+                                selectedLabelColor = Color(0xFF00E5A3)
+                            )
                         )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            FilterChip(
-                                selected = fallbackToFixedPosition,
-                                onClick = {
-                                    onFallbackToFixedPositionChange(true)
-                                    engineSession.updateParameters(fallbackToFixedPosition = true)
-                                },
-                                label = { Text("自動追蹤 + 固定位置 (推薦)") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = Color(0xFF00E5A3).copy(alpha = 0.22f),
-                                    selectedLabelColor = Color(0xFF00E5A3)
-                                )
+                        FilterChip(
+                            selected = !fallbackToFixedPosition,
+                            onClick = {
+                                onFallbackToFixedPositionChange(false)
+                                engineSession.updateParameters(fallbackToFixedPosition = false)
+                            },
+                            label = { Text("僅特徵吻合時打碼") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.24f),
+                                selectedLabelColor = Color(0xFF38BDF8)
                             )
-                            FilterChip(
-                                selected = !fallbackToFixedPosition,
-                                onClick = {
-                                    onFallbackToFixedPositionChange(false)
-                                    engineSession.updateParameters(fallbackToFixedPosition = false)
-                                },
-                                label = { Text("僅特徵吻合時打碼") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.24f),
-                                    selectedLabelColor = Color(0xFF38BDF8)
-                                )
-                            )
-                        }
+                        )
                     }
 
                     // Mosaic Block Size selector
