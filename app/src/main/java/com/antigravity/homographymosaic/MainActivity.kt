@@ -22,7 +22,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -60,7 +59,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         engineSession = MosaicEngineSession(
-            initialBlockSize = 16,
+            initialBlockSize = 32,
             initialNoiseAmplitude = 18,
             initialFallbackToFixedPosition = true
         )
@@ -90,8 +89,6 @@ private fun HomographyMosaicApp(
     templateRepository: TemplateRepository
 ) {
     var learningPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
-    var blockSize by rememberSaveable { mutableIntStateOf(16) }
-    var jpegQuality by rememberSaveable { mutableIntStateOf(92) }
     var fallbackToFixedPosition by rememberSaveable { mutableStateOf(true) }
 
     // Sub-1ms FAMTPL02 binary mmap cold-start preload (zero camera permissions needed)
@@ -142,10 +139,6 @@ private fun HomographyMosaicApp(
                 BatchGalleryScreen(
                     engineSession = engineSession,
                     templateRepository = templateRepository,
-                    blockSize = blockSize,
-                    onBlockSizeChange = { blockSize = it },
-                    jpegQuality = jpegQuality,
-                    onJpegQualityChange = { jpegQuality = it },
                     fallbackToFixedPosition = fallbackToFixedPosition,
                     onFallbackToFixedPositionChange = { fallbackToFixedPosition = it },
                     onReferencePhotoPicked = { pickedUri ->

@@ -78,14 +78,13 @@ data class BatchItemReport(
     val telemetry: GalleryJpegTelemetry
 )
 
+private const val FIXED_MOSAIC_BLOCK_SIZE_PX = 32
+private const val FIXED_OUTPUT_JPEG_QUALITY = 85
+
 @Composable
 fun BatchGalleryScreen(
     engineSession: MosaicEngineSession,
     templateRepository: TemplateRepository,
-    blockSize: Int,
-    onBlockSizeChange: (Int) -> Unit,
-    jpegQuality: Int,
-    onJpegQualityChange: (Int) -> Unit,
     fallbackToFixedPosition: Boolean,
     onFallbackToFixedPositionChange: (Boolean) -> Unit,
     onReferencePhotoPicked: (Uri) -> Unit,
@@ -116,8 +115,8 @@ fun BatchGalleryScreen(
                     engineSession = engineSession,
                     sourceUri = srcUri,
                     itemIndex = idx + 1,
-                    jpegQuality = jpegQuality,
-                    blockSize = blockSize
+                    jpegQuality = FIXED_OUTPUT_JPEG_QUALITY,
+                    blockSize = FIXED_MOSAIC_BLOCK_SIZE_PX
                 )
                 reports.add(0, report)
                 completedCount = idx + 1
@@ -191,57 +190,6 @@ fun BatchGalleryScreen(
                                 selectedLabelColor = Color(0xFF38BDF8)
                             )
                         )
-                    }
-
-                    // Mosaic Block Size selector
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "馬賽克粒度:",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color(0xFFCBD5E1)
-                        )
-                        listOf(12, 16, 24, 32).forEach { sizeOption ->
-                            FilterChip(
-                                selected = blockSize == sizeOption,
-                                onClick = {
-                                    onBlockSizeChange(sizeOption)
-                                    engineSession.updateParameters(blockSize = sizeOption)
-                                },
-                                label = { Text("${sizeOption}px") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = Color(0xFF00E5A3).copy(alpha = 0.22f),
-                                    selectedLabelColor = Color(0xFF00E5A3)
-                                )
-                            )
-                        }
-                    }
-
-                    // JPEG Quality quick selector
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "輸出品質:",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color(0xFFCBD5E1)
-                        )
-                        listOf(85, 92, 96).forEach { qOption ->
-                            FilterChip(
-                                selected = jpegQuality == qOption,
-                                onClick = { onJpegQualityChange(qOption) },
-                                label = { Text("Q$qOption") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.24f),
-                                    selectedLabelColor = Color(0xFF38BDF8)
-                                )
-                            )
-                        }
                     }
 
                     if (isProcessing && totalSelectedCount > 0) {
