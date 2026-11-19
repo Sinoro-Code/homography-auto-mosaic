@@ -173,7 +173,7 @@ fun BatchGalleryScreen(
                                 onFallbackToFixedPositionChange(true)
                                 engineSession.updateParameters(fallbackToFixedPosition = true)
                             },
-                            label = { Text("自動追蹤 + 固定位置 (推薦)") },
+                            label = { Text("特徵或區域打碼") },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = Color(0xFF00E5A3).copy(alpha = 0.22f),
                                 selectedLabelColor = Color(0xFF00E5A3)
@@ -185,7 +185,7 @@ fun BatchGalleryScreen(
                                 onFallbackToFixedPositionChange(false)
                                 engineSession.updateParameters(fallbackToFixedPosition = false)
                             },
-                            label = { Text("僅特徵吻合時打碼") },
+                            label = { Text("特徵打碼") },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.24f),
                                 selectedLabelColor = Color(0xFF38BDF8)
@@ -273,7 +273,7 @@ fun BatchGalleryScreen(
                         ) {
                             Icon(Icons.Default.ImageSearch, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("從相簿選取範例相片", fontWeight = FontWeight.Bold)
+                            Text("建立範本", fontWeight = FontWeight.Bold)
                         }
                     } else {
                         Row(
@@ -364,7 +364,7 @@ fun BatchGalleryScreen(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("從相簿選取範例相片", color = Color(0xFF00E5A3))
+                    Text("建立範本", color = Color(0xFF00E5A3))
                 }
             }
         }
