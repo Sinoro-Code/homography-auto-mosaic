@@ -23,7 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material3.Button
@@ -31,6 +31,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -65,7 +66,9 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun PhotoLearnScreen(
+    initialReferenceUri: Uri,
     templateRepository: TemplateRepository,
+    onCancel: () -> Unit,
     onLearnedSuccess: (FamTemplateEntry) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -73,12 +76,12 @@ fun PhotoLearnScreen(
     val scope = rememberCoroutineScope()
     val editorState = rememberPolygonEditorState()
 
-    var referenceUri by remember { mutableStateOf<Uri?>(null) }
+    var referenceUri by remember(initialReferenceUri) { mutableStateOf(initialReferenceUri) }
     var headerInfo by remember { mutableStateOf<JpegHeaderInfo?>(null) }
     var templateName by remember { mutableStateOf("") }
     var makeExclusiveActive by remember { mutableStateOf(true) }
     var isLearning by remember { mutableStateOf(false) }
-    var statusMessage by remember { mutableStateOf<String?>(null) }
+    var statusMessage by remember { mutableStateOf<String?>("正在載入範例相片...") }
     var isErrorStatus by remember { mutableStateOf(false) }
 
     val referencePicker = rememberLauncherForActivityResult(
@@ -86,16 +89,15 @@ fun PhotoLearnScreen(
     ) { pickedUri ->
         if (pickedUri != null) {
             editorState.clearAll()
-            statusMessage = null
+            statusMessage = "正在載入範例相片..."
             isErrorStatus = false
             referenceUri = pickedUri
         }
     }
 
     LaunchedEffect(referenceUri) {
-        val uri = referenceUri ?: return@LaunchedEffect
         val info = withContext(Dispatchers.IO) {
-            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            context.contentResolver.openFileDescriptor(referenceUri, "r")?.use { pfd ->
                 MosaicNative.inspectJpegFd(pfd.fd)
             } ?: JpegHeaderInfo(false, 0, 0, 0, 0, 1)
         }
@@ -120,8 +122,7 @@ fun PhotoLearnScreen(
         val activeUri = referenceUri
         val activeHeader = headerInfo
 
-        if (activeUri == null || activeHeader == null) {
-            // Empty-state onboarding card
+        if (activeHeader == null) {
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -140,62 +141,64 @@ fun PhotoLearnScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.AddPhotoAlternate,
-                            contentDescription = null,
-                            tint = Color(0xFF00E5A3),
-                            modifier = Modifier.size(48.dp)
-                        )
-                        Text(
-                            text = "步驟 1：選取範例相片並設定打碼位置",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = "無須開啟相機。支援直接選取相機拍攝之全格式相片（JPEG / HEIC / HEIF / PNG / WebP / AVIF），在欲遮蔽的位置拖曳框選（單處或多處），學習後即可自動在該位置極速打碼。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF94A3B8)
-                        )
                         if (statusMessage != null) {
                             Text(
                                 text = statusMessage!!,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isErrorStatus) Color(0xFFF87171) else Color(0xFF00E5A3)
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isErrorStatus) Color(0xFFF87171) else Color(0xFF94A3B8)
                             )
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Button(
-                            onClick = {
-                                referencePicker.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF00E5A3),
-                                contentColor = Color(0xFF0B0F17)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Icon(Icons.Default.ImageSearch, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("從相簿選取範例相片", fontWeight = FontWeight.Bold)
+                            OutlinedButton(
+                                onClick = onCancel,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("返回")
+                            }
+                            Button(
+                                onClick = {
+                                    referencePicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF00E5A3),
+                                    contentColor = Color(0xFF0B0F17)
+                                ),
+                                modifier = Modifier.weight(1.4f)
+                            ) {
+                                Icon(Icons.Default.ImageSearch, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("重選範例相片", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
             }
         } else {
-            // Top bar: switch reference photo + polygon mode toolbar
+            // Top bar: back button + photo dimensions + switch reference photo
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(
-                    text = "範例相片 ${activeHeader.uprightWidth}×${activeHeader.uprightHeight}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color(0xFF94A3B8)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onCancel) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "返回",
+                            tint = Color.White
+                        )
+                    }
+                    Text(
+                        text = "範例相片 ${activeHeader.uprightWidth}×${activeHeader.uprightHeight}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
                 OutlinedButton(
                     onClick = {
                         referencePicker.launch(

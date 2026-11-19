@@ -1,5 +1,6 @@
 package com.antigravity.homographymosaic
 
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -10,16 +11,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CropFree
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -51,11 +46,6 @@ private val TacticalDarkColorScheme = darkColorScheme(
     onBackground = Color(0xFFF1F5F9),
     onSurface = Color(0xFFF1F5F9)
 )
-
-private enum class AppDestination {
-    LEARN_POSITION,
-    AUTO_MOSAIC_PHOTOS
-}
 
 class MainActivity : ComponentActivity() {
 
@@ -99,8 +89,7 @@ private fun HomographyMosaicApp(
     engineSession: MosaicEngineSession,
     templateRepository: TemplateRepository
 ) {
-    var currentTab by rememberSaveable { mutableStateOf(AppDestination.LEARN_POSITION) }
-    var hasAutoRoutedOnColdStart by rememberSaveable { mutableStateOf(false) }
+    var learningPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var blockSize by rememberSaveable { mutableIntStateOf(16) }
     var jpegQuality by rememberSaveable { mutableIntStateOf(92) }
     var fallbackToFixedPosition by rememberSaveable { mutableStateOf(true) }
@@ -108,12 +97,6 @@ private fun HomographyMosaicApp(
     // Sub-1ms FAMTPL02 binary mmap cold-start preload (zero camera permissions needed)
     LaunchedEffect(Unit) {
         templateRepository.preloadAllTemplates()
-        if (!hasAutoRoutedOnColdStart) {
-            hasAutoRoutedOnColdStart = true
-            if (templateRepository.templates.value.any { it.enabled }) {
-                currentTab = AppDestination.AUTO_MOSAIC_PHOTOS
-            }
-        }
     }
 
     Scaffold(
@@ -138,67 +121,37 @@ private fun HomographyMosaicApp(
                     )
                 }
             }
-        },
-        bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0F172A)) {
-                NavigationBarItem(
-                    selected = currentTab == AppDestination.LEARN_POSITION,
-                    onClick = { currentTab = AppDestination.LEARN_POSITION },
-                    icon = { Icon(Icons.Default.CropFree, contentDescription = null) },
-                    label = { Text("1. 設定打碼位置") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = Color(0xFF00E5A3),
-                        selectedTextColor = Color(0xFF00E5A3),
-                        indicatorColor = Color(0xFF00E5A3).copy(alpha = 0.16f),
-                        unselectedIconColor = Color(0xFF64748B),
-                        unselectedTextColor = Color(0xFF64748B)
-                    )
-                )
-                NavigationBarItem(
-                    selected = currentTab == AppDestination.AUTO_MOSAIC_PHOTOS,
-                    onClick = { currentTab = AppDestination.AUTO_MOSAIC_PHOTOS },
-                    icon = { Icon(Icons.Default.PhotoLibrary, contentDescription = null) },
-                    label = { Text("2. 選取相片打碼") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = Color(0xFF38BDF8),
-                        selectedTextColor = Color(0xFF38BDF8),
-                        indicatorColor = Color(0xFF38BDF8).copy(alpha = 0.16f),
-                        unselectedIconColor = Color(0xFF64748B),
-                        unselectedTextColor = Color(0xFF64748B)
-                    )
-                )
-            }
         }
     ) { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .navigationBarsPadding()
                 .background(Color(0xFF0B0F17))
         ) {
-            when (currentTab) {
-                AppDestination.LEARN_POSITION -> {
-                    PhotoLearnScreen(
-                        templateRepository = templateRepository,
-                        onLearnedSuccess = {
-                            currentTab = AppDestination.AUTO_MOSAIC_PHOTOS
-                        }
-                    )
-                }
-
-                AppDestination.AUTO_MOSAIC_PHOTOS -> {
-                    BatchGalleryScreen(
-                        engineSession = engineSession,
-                        templateRepository = templateRepository,
-                        blockSize = blockSize,
-                        onBlockSizeChange = { blockSize = it },
-                        jpegQuality = jpegQuality,
-                        onJpegQualityChange = { jpegQuality = it },
-                        fallbackToFixedPosition = fallbackToFixedPosition,
-                        onFallbackToFixedPositionChange = { fallbackToFixedPosition = it },
-                        onNavigateToLearn = { currentTab = AppDestination.LEARN_POSITION }
-                    )
-                }
+            val activeLearnUri = learningPhotoUriString?.let { Uri.parse(it) }
+            if (activeLearnUri != null) {
+                PhotoLearnScreen(
+                    initialReferenceUri = activeLearnUri,
+                    templateRepository = templateRepository,
+                    onCancel = { learningPhotoUriString = null },
+                    onLearnedSuccess = { learningPhotoUriString = null }
+                )
+            } else {
+                BatchGalleryScreen(
+                    engineSession = engineSession,
+                    templateRepository = templateRepository,
+                    blockSize = blockSize,
+                    onBlockSizeChange = { blockSize = it },
+                    jpegQuality = jpegQuality,
+                    onJpegQualityChange = { jpegQuality = it },
+                    fallbackToFixedPosition = fallbackToFixedPosition,
+                    onFallbackToFixedPositionChange = { fallbackToFixedPosition = it },
+                    onReferencePhotoPicked = { pickedUri ->
+                        learningPhotoUriString = pickedUri.toString()
+                    }
+                )
             }
         }
     }

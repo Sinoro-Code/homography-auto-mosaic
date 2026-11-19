@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FolderSpecial
+import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.RemoveCircleOutline
@@ -88,7 +89,7 @@ fun BatchGalleryScreen(
     onJpegQualityChange: (Int) -> Unit,
     fallbackToFixedPosition: Boolean,
     onFallbackToFixedPositionChange: (Boolean) -> Unit,
-    onNavigateToLearn: () -> Unit,
+    onReferencePhotoPicked: (Uri) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -143,6 +144,12 @@ fun BatchGalleryScreen(
         }
     }
 
+    val referencePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) onReferencePhotoPicked(uri)
+    }
+
     val singlePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -180,7 +187,7 @@ fun BatchGalleryScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "步驟 2：選取相片自動打碼（啟用位置: $activeCount）",
+                            text = "選取相片自動打碼（啟用位置: $activeCount）",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -298,16 +305,20 @@ fun BatchGalleryScreen(
 
                     if (activeCount == 0) {
                         Button(
-                            onClick = onNavigateToLearn,
+                            onClick = {
+                                referencePicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFFBBF24),
+                                containerColor = Color(0xFF00E5A3),
                                 contentColor = Color(0xFF0B0F17)
                             ),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(Icons.Default.AddCircleOutline, contentDescription = null)
+                            Icon(Icons.Default.ImageSearch, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("尚未設定打碼位置 · 點此前往設定", fontWeight = FontWeight.Bold)
+                            Text("從相簿選取範例相片", fontWeight = FontWeight.Bold)
                         }
                     } else {
                         Row(
@@ -384,7 +395,13 @@ fun BatchGalleryScreen(
                     )
                 }
 
-                TextButton(onClick = onNavigateToLearn) {
+                TextButton(
+                    onClick = {
+                        referencePicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    }
+                ) {
                     Icon(
                         Icons.Default.AddCircleOutline,
                         contentDescription = null,
@@ -392,7 +409,7 @@ fun BatchGalleryScreen(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("新增 / 重設位置", color = Color(0xFF00E5A3))
+                    Text("從相簿選取範例相片", color = Color(0xFF00E5A3))
                 }
             }
         }
