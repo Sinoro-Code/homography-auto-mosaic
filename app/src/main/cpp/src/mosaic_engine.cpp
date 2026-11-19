@@ -947,40 +947,51 @@ struct MosaicEngine::Impl {
     MosaicConfig config;
     cv::Ptr<cv::ORB> learnOrb;
     cv::Ptr<cv::ORB> targetOrb;
+    cv::Ptr<cv::CLAHE> clahe;
     std::unordered_map<std::string, MappedFamTemplate> templates;
 
     explicit Impl(const MosaicConfig& cfg) : config(cfg) {
         // Strictly enforce Red Line #1: 100% Pure CPU, disable any OpenCL dispatch inside OpenCV
         cv::ocl::setUseOpenCL(false);
         cv::setNumThreads(2); // Keep big/mid cores responsive without thread-pool thrashing
+        clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
         rebuildDetectors();
     }
 
     std::vector<uint8_t> pyramidStage1;
     std::vector<uint8_t> pyramidStage2;
+    cv::Mat claheWorkY;
 
     void rebuildDetectors() {
         learnOrb = cv::ORB::create(
             std::clamp(config.learnOrbFeatures, 100, 4000),
             1.2f,
-            6,
-            19,
+            8,
+            15,
             0,
             2,
             cv::ORB::HARRIS_SCORE,
             31,
-            18);
+            12);
 
         targetOrb = cv::ORB::create(
             std::clamp(config.targetOrbFeatures, 100, 2500),
-            1.25f,
-            3,
-            19,
+            1.2f,
+            6,
+            15,
             0,
             2,
-            cv::ORB::FAST_SCORE,
+            cv::ORB::HARRIS_SCORE,
             31,
-            20);
+            14);
+    }
+
+    cv::Mat enhanceWorkY(const cv::Mat& workY) {
+        if (clahe && workY.cols >= 32 && workY.rows >= 32) {
+            clahe->apply(workY, claheWorkY);
+            return claheWorkY;
+        }
+        return workY;
     }
 
     cv::Mat prepareWorkYMat(
@@ -1221,7 +1232,37 @@ LearnResult MosaicEngine::learnTemplateToBuffer(
         cv::Mat workY = impl_->prepareWorkYMat(
             yView.yPtr, yView.width, yView.height, yView.yRowStride,
             true, scaleX, scaleY);
-        impl_->learnOrb->detectAndCompute(workY, cv::noArray(), cvKps, cvDesc);
+        cv::Mat enhancedY = impl_->enhanceWorkY(workY);
+
+        // Exclude user-drawn mosaic polygons so variable content inside the masked area
+        // (e.g. changing ID numbers/names/faces) does not pollute template keypoints
+        cv::Mat learnMask(enhancedY.rows, enhancedY.cols, CV_8UC1, cv::Scalar(255));
+        std::vector<std::vector<cv::Point>> maskPolys;
+        maskPolys.reserve(polygons.size());
+        for (const auto& poly : polygons) {
+            std::vector<cv::Point> pts;
+            pts.reserve(poly.vertices.size());
+            for (const auto& v : poly.vertices) {
+                const int px = static_cast<int>(
+                    std::clamp(v.normX, 0.0f, 1.0f) * static_cast<float>(enhancedY.cols - 1));
+                const int py = static_cast<int>(
+                    std::clamp(v.normY, 0.0f, 1.0f) * static_cast<float>(enhancedY.rows - 1));
+                pts.emplace_back(px, py);
+            }
+            if (pts.size() >= 3) {
+                maskPolys.push_back(std::move(pts));
+            }
+        }
+        if (!maskPolys.empty()) {
+            cv::fillPoly(learnMask, maskPolys, cv::Scalar(0));
+            impl_->learnOrb->detectAndCompute(enhancedY, learnMask, cvKps, cvDesc);
+        }
+        // Fallback to full-frame extraction if user masked almost the entire image
+        if (cvKps.size() < 40) {
+            cvKps.clear();
+            cvDesc.release();
+            impl_->learnOrb->detectAndCompute(enhancedY, cv::noArray(), cvKps, cvDesc);
+        }
     }
 
     std::vector<FamTplKeypoint> tplKps;
@@ -1478,10 +1519,11 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
             cv::Mat workY = impl_->prepareWorkYMat(
                 frame.yPtr, frame.width, frame.height, frame.yRowStride,
                 false, scaleToFullX, scaleToFullY);
-            workW = workY.cols;
-            workH = workY.rows;
+            cv::Mat enhancedY = impl_->enhanceWorkY(workY);
+            workW = enhancedY.cols;
+            workH = enhancedY.rows;
             // Note: cv::ORB uses OpenCV internal buffers so lock guards detector state cleanly
-            impl_->targetOrb->detectAndCompute(workY, cv::noArray(), targetKps, targetDesc);
+            impl_->targetOrb->detectAndCompute(enhancedY, cv::noArray(), targetKps, targetDesc);
         }
         result.downsampleAndOrbUs = elapsedMicroseconds(tOrbStart);
     }

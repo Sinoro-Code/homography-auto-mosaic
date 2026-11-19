@@ -70,15 +70,15 @@ struct YPlaneConstView {
 };
 
 struct MosaicConfig {
-    int32_t learnOrbFeatures = 700;    // Richer feature set during one-time template learning
-    int32_t targetOrbFeatures = 500;   // Fast target extraction budget (< 1.5 ms on 640p work pyramid)
-    int32_t orbWorkMaxDim = 640;       // Max working dimension for NEON strided Y downsample
-    float loweRatio = 0.78f;           // Lowe's 2-NN Hamming ratio test threshold
-    int32_t maxHammingDist = 64;       // Hard Hamming distance cutoff out of 256 bits
-    int32_t minInliers = 10;           // Minimum USAC_MAGSAC geometric inliers to accept homography
-    double magsacReprojThreshold = 3.5;// Reprojection threshold in working-pyramid pixels
-    int32_t magsacMaxIters = 1500;     // USAC_MAGSAC iteration cap
-    int32_t mosaicBlockSize = 16;      // Luma mosaic cell size (snapped to even >= 8)
+    int32_t learnOrbFeatures = 1500;   // Rich multi-scale feature set during one-time template learning
+    int32_t targetOrbFeatures = 1200;  // High-recall target extraction on 960p work pyramid
+    int32_t orbWorkMaxDim = 960;       // Max working dimension for NEON strided Y downsample
+    float loweRatio = 0.82f;           // Lowe's 2-NN Hamming ratio test threshold
+    int32_t maxHammingDist = 72;       // Hard Hamming distance cutoff out of 256 bits
+    int32_t minInliers = 8;            // Minimum USAC_MAGSAC geometric inliers to accept homography
+    double magsacReprojThreshold = 4.5;// Reprojection threshold in working-pyramid pixels
+    int32_t magsacMaxIters = 2000;     // USAC_MAGSAC iteration cap
+    int32_t mosaicBlockSize = 32;      // Luma mosaic cell size (snapped to even >= 8)
     uint8_t noiseAmplitude = 18;       // Xorshift luma noise amplitude for anti-Depix protection
     bool fallbackToFixedPosition = false; // Apply learned upright [0,1] position when Homography < minInliers
 };

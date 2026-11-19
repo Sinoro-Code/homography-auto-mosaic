@@ -212,8 +212,8 @@ class MosaicEngineSession(
     private val rwLock = ReentrantReadWriteLock()
     private var currentBlockSize: Int = initialBlockSize
     private var currentNoiseAmplitude: Int = initialNoiseAmplitude
-    private var currentLoweRatio: Float = 0.78f
-    private var currentMinInliers: Int = 10
+    private var currentLoweRatio: Float = 0.82f
+    private var currentMinInliers: Int = 8
     private var currentFallbackToFixedPosition: Boolean = initialFallbackToFixedPosition
 
     private var nativeHandle: Long = MosaicNative.nativeCreateEngine(
