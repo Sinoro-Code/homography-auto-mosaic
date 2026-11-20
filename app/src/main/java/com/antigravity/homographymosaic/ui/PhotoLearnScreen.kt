@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -253,70 +254,85 @@ fun PhotoLearnScreen(
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedTextField(
-                        value = templateName,
-                        onValueChange = {
-                            templateName = it
-                            if (isNameError) isNameError = false
-                        },
-                        singleLine = true,
-                        isError = isNameError,
-                        label = { Text("範本名稱") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
                     val polygons = editorState.simplifiedPolygons
-                    Button(
-                        enabled = !isLearning && polygons.isNotEmpty(),
-                        onClick = {
-                            val trimmedName = templateName.trim()
-                            if (trimmedName.isEmpty() || !VALID_TEMPLATE_NAME_REGEX.matches(trimmedName)) {
-                                isNameError = true
-                                return@Button
-                            }
-                            isNameError = false
-                            isLearning = true
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    val pfd = context.contentResolver.openFileDescriptor(activeUri, "r")
-                                    if (pfd == null) {
-                                        Result.failure(IllegalStateException("無法讀取所選範例相片"))
-                                    } else {
-                                        pfd.use {
-                                            templateRepository.learnAndSaveTemplateFromJpegFd(
-                                                displayName = trimmedName,
-                                                inFd = it.fd,
-                                                uprightPolygons = polygons,
-                                                makeExclusiveActive = false
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = templateName,
+                            onValueChange = {
+                                templateName = it
+                                if (isNameError) isNameError = false
+                            },
+                            singleLine = true,
+                            isError = isNameError,
+                            trailingIcon = {
+                                Button(
+                                    enabled = !isLearning && polygons.isNotEmpty(),
+                                    onClick = {
+                                        val trimmedName = templateName.trim()
+                                        if (trimmedName.isEmpty() || !VALID_TEMPLATE_NAME_REGEX.matches(trimmedName)) {
+                                            isNameError = true
+                                            return@Button
+                                        }
+                                        isNameError = false
+                                        isLearning = true
+                                        scope.launch {
+                                            val res = withContext(Dispatchers.IO) {
+                                                val pfd = context.contentResolver.openFileDescriptor(activeUri, "r")
+                                                if (pfd == null) {
+                                                    Result.failure(IllegalStateException("無法讀取所選範例相片"))
+                                                } else {
+                                                    pfd.use {
+                                                        templateRepository.learnAndSaveTemplateFromJpegFd(
+                                                            displayName = trimmedName,
+                                                            inFd = it.fd,
+                                                            uprightPolygons = polygons,
+                                                            makeExclusiveActive = false
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            isLearning = false
+                                            res.fold(
+                                                onSuccess = { entry ->
+                                                    templateName = ""
+                                                    editorState.clearAll()
+                                                    onLearnedSuccess(entry)
+                                                },
+                                                onFailure = { err ->
+                                                    statusMessage = err.message ?: "儲存失敗"
+                                                    isErrorStatus = true
+                                                }
                                             )
                                         }
-                                    }
-                                }
-                                isLearning = false
-                                res.fold(
-                                    onSuccess = { entry ->
-                                        templateName = ""
-                                        editorState.clearAll()
-                                        onLearnedSuccess(entry)
                                     },
-                                    onFailure = { err ->
-                                        statusMessage = err.message ?: "儲存失敗"
-                                        isErrorStatus = true
-                                    }
-                                )
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF00E5A3),
-                            contentColor = Color(0xFF0B0F17)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Default.AutoFixHigh, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF00E5A3),
+                                        contentColor = Color(0xFF0B0F17)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.padding(end = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "儲存範本",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp)
+                        )
+
                         Text(
-                            text = "儲存範本",
-                            fontWeight = FontWeight.Bold
+                            text = "範本名稱",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isNameError) MaterialTheme.colorScheme.error else Color(0xFF94A3B8),
+                            modifier = Modifier
+                                .padding(start = 12.dp)
+                                .background(Color(0xFF131B2E))
+                                .padding(horizontal = 4.dp)
                         )
                     }
                 }
