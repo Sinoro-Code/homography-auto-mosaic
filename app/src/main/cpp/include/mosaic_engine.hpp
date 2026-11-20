@@ -80,7 +80,6 @@ struct MosaicConfig {
     int32_t magsacMaxIters = 2000;     // USAC_MAGSAC iteration cap
     int32_t mosaicBlockSize = 32;      // Luma mosaic cell size (snapped to even >= 8)
     uint8_t noiseAmplitude = 18;       // Xorshift luma noise amplitude for anti-Depix protection
-    bool fallbackToFixedPosition = false; // Apply learned upright [0,1] position when Homography < minInliers
 };
 
 struct NormalizedPolygon {

@@ -61,8 +61,7 @@ object MosaicNative {
     @JvmStatic
     external fun nativeCreateEngine(
         blockSize: Int,
-        noiseAmplitude: Int,
-        fallbackToFixedPosition: Boolean
+        noiseAmplitude: Int
     ): Long
 
     @JvmStatic
@@ -74,8 +73,7 @@ object MosaicNative {
         blockSize: Int,
         noiseAmplitude: Int,
         loweRatio: Float,
-        minInliers: Int,
-        fallbackToFixedPosition: Boolean
+        minInliers: Int
     )
 
     @JvmStatic
@@ -204,9 +202,8 @@ object MosaicNative {
  * lifecycle destruction and template mutations remain strictly serialized.
  */
 class MosaicEngineSession(
-    initialBlockSize: Int = 16,
-    initialNoiseAmplitude: Int = 18,
-    initialFallbackToFixedPosition: Boolean = true
+    initialBlockSize: Int = 32,
+    initialNoiseAmplitude: Int = 18
 ) : Closeable {
 
     private val rwLock = ReentrantReadWriteLock()
@@ -214,12 +211,10 @@ class MosaicEngineSession(
     private var currentNoiseAmplitude: Int = initialNoiseAmplitude
     private var currentLoweRatio: Float = 0.82f
     private var currentMinInliers: Int = 8
-    private var currentFallbackToFixedPosition: Boolean = initialFallbackToFixedPosition
 
     private var nativeHandle: Long = MosaicNative.nativeCreateEngine(
         blockSize = initialBlockSize,
-        noiseAmplitude = initialNoiseAmplitude,
-        fallbackToFixedPosition = initialFallbackToFixedPosition
+        noiseAmplitude = initialNoiseAmplitude
     )
 
     private val threadLocalStats = object : ThreadLocal<LongArray>() {
@@ -230,22 +225,19 @@ class MosaicEngineSession(
         blockSize: Int = currentBlockSize,
         noiseAmplitude: Int = currentNoiseAmplitude,
         loweRatio: Float = currentLoweRatio,
-        minInliers: Int = currentMinInliers,
-        fallbackToFixedPosition: Boolean = currentFallbackToFixedPosition
+        minInliers: Int = currentMinInliers
     ) = rwLock.write {
         currentBlockSize = blockSize
         currentNoiseAmplitude = noiseAmplitude
         currentLoweRatio = loweRatio
         currentMinInliers = minInliers
-        currentFallbackToFixedPosition = fallbackToFixedPosition
         if (nativeHandle != 0L) {
             MosaicNative.nativeUpdateConfig(
                 handle = nativeHandle,
                 blockSize = currentBlockSize,
                 noiseAmplitude = currentNoiseAmplitude,
                 loweRatio = currentLoweRatio,
-                minInliers = currentMinInliers,
-                fallbackToFixedPosition = currentFallbackToFixedPosition
+                minInliers = currentMinInliers
             )
         }
     }

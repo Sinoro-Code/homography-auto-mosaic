@@ -1534,18 +1534,15 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
         targetKps.size() >= static_cast<size_t>(cfg.minInliers) &&
         !targetDesc.empty();
 
-    if (!canAttemptHomography && !cfg.fallbackToFixedPosition) {
+    if (!canAttemptHomography) {
         result.totalUs = elapsedMicroseconds(tTotalStart);
         result.statusMessage = "Insufficient ORB keypoints on target frame";
         return result;
     }
 
-    const std::span<const uint8_t> targetDescSpan =
-        canAttemptHomography
-            ? std::span<const uint8_t>(
-                  targetDesc.ptr<uint8_t>(0),
-                  targetKps.size() * kOrbDescriptorBytes)
-            : std::span<const uint8_t>{};
+    const std::span<const uint8_t> targetDescSpan(
+        targetDesc.ptr<uint8_t>(0),
+        targetKps.size() * kOrbDescriptorBytes);
 
     // Step 2: Match against all loaded memory-mapped FAMTPL02 templates + USAC_MAGSAC
     const auto tMatchStart = SteadyClock::now();
@@ -1567,10 +1564,8 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
             const auto* hdr = tpl.header();
             const auto polySpans = tpl.polygons();
             const auto tplVerts = tpl.vertices();
-            bool matchedHomography = false;
 
-            if (canAttemptHomography &&
-                static_cast<int32_t>(tpl.keypointCount()) >= cfg.minInliers) {
+            if (static_cast<int32_t>(tpl.keypointCount()) >= cfg.minInliers) {
                 // Query = target frame descriptors, Train = template descriptors
                 matchDescriptorsHammingPopcnt(
                     targetDescSpan,
@@ -1651,42 +1646,10 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
                                 }
                                 allProjected.push_back(std::move(projPoly));
                             }
-                            matchedHomography = true;
                             ++result.templatesMatched;
                         }
                     }
                 }
-            }
-
-            // Fallback: apply learned normalized [0, 1] position directly (with EXIF alignment)
-            if (!matchedHomography && cfg.fallbackToFixedPosition) {
-                const uint16_t refOrient = decodeFamTplExifOrientation(hdr->flags);
-                const uint16_t tgtOrient =
-                    (targetExifOrientation >= 1 && targetExifOrientation <= 8)
-                        ? targetExifOrientation
-                        : 1;
-                const float fw = static_cast<float>(frame.width);
-                const float fh = static_cast<float>(frame.height);
-
-                for (const auto& span : polySpans) {
-                    ProjectedPolygon projPoly;
-                    projPoly.templateId = tplId;
-                    projPoly.pixelVertices.reserve(span.vertexCount);
-                    for (uint32_t vi = 0; vi < span.vertexCount; ++vi) {
-                        const auto& v = tplVerts[span.firstVertex + vi];
-                        const FamTplVertex upright =
-                            rawToUprightNormalized(v.normX, v.normY, refOrient);
-                        const FamTplVertex tgtRaw =
-                            uprightToRawNormalized(upright.normX, upright.normY, tgtOrient);
-                        projPoly.pixelVertices.push_back(FamTplVertex{
-                            std::clamp(tgtRaw.normX, 0.0f, 1.0f) * fw,
-                            std::clamp(tgtRaw.normY, 0.0f, 1.0f) * fh
-                        });
-                    }
-                    allProjected.push_back(std::move(projPoly));
-                }
-                ++result.templatesMatched;
-                ++result.fixedPositionApplied;
             }
         }
     }
@@ -1710,9 +1673,7 @@ MosaicProcessResult MosaicEngine::processYuvInPlace(
         result.neonMosaicUs = elapsedMicroseconds(tMosaicStart);
         result.matchedAny = true;
         result.projectedPolygons = std::move(allProjected);
-        result.statusMessage = (result.fixedPositionApplied > 0 && result.bestInlierCount == 0)
-                                   ? "Applied learned position NEON mosaic in-place"
-                                   : "Matched Homography and applied NEON mosaic in-place";
+        result.statusMessage = "Matched Homography and applied NEON mosaic in-place";
     } else {
         result.statusMessage = "Target not present in frame";
     }

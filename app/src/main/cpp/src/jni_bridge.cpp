@@ -187,15 +187,13 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeCreateEngine(
     JNIEnv* /*env*/,
     jobject /*thiz*/,
     jint blockSize,
-    jint noiseAmplitude,
-    jboolean fallbackToFixedPosition) {
+    jint noiseAmplitude) {
 
     try {
         fam::MosaicConfig cfg{};
         cfg.mosaicBlockSize = std::clamp(static_cast<int32_t>(blockSize), 8, 64) & ~1;
         cfg.noiseAmplitude =
             static_cast<uint8_t>(std::clamp(static_cast<int32_t>(noiseAmplitude), 0, 64));
-        cfg.fallbackToFixedPosition = (fallbackToFixedPosition == JNI_TRUE);
         auto* ctx = new NativeEngineContext(cfg);
         return reinterpret_cast<jlong>(ctx);
     } catch (const std::exception& e) {
@@ -222,8 +220,7 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeUpdateConfig(
     jint blockSize,
     jint noiseAmplitude,
     jfloat loweRatio,
-    jint minInliers,
-    jboolean fallbackToFixedPosition) {
+    jint minInliers) {
 
     auto* ctx = reinterpret_cast<NativeEngineContext*>(handle);
     if (!ctx) {
@@ -236,7 +233,6 @@ Java_com_antigravity_homographymosaic_core_MosaicNative_nativeUpdateConfig(
             static_cast<uint8_t>(std::clamp(static_cast<int32_t>(noiseAmplitude), 0, 64));
         cfg.loweRatio = std::clamp(static_cast<float>(loweRatio), 0.55f, 0.92f);
         cfg.minInliers = std::clamp(static_cast<int32_t>(minInliers), 6, 100);
-        cfg.fallbackToFixedPosition = (fallbackToFixedPosition == JNI_TRUE);
         ctx->engine.updateConfig(cfg);
     } catch (const std::exception& e) {
         FAM_LOGE("nativeUpdateConfig exception: %s", e.what());

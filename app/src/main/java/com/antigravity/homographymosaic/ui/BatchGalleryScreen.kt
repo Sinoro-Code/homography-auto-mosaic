@@ -85,8 +85,6 @@ private const val FIXED_OUTPUT_JPEG_QUALITY = 85
 fun BatchGalleryScreen(
     engineSession: MosaicEngineSession,
     templateRepository: TemplateRepository,
-    fallbackToFixedPosition: Boolean,
-    onFallbackToFixedPositionChange: (Boolean) -> Unit,
     onReferencePhotoPicked: (Uri) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -161,37 +159,6 @@ fun BatchGalleryScreen(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Alignment Mode selector (Homography + Fixed Position vs Strict Homography only)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FilterChip(
-                            selected = fallbackToFixedPosition,
-                            onClick = {
-                                onFallbackToFixedPositionChange(true)
-                                engineSession.updateParameters(fallbackToFixedPosition = true)
-                            },
-                            label = { Text("特徵或區域打碼") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = Color(0xFF00E5A3).copy(alpha = 0.22f),
-                                selectedLabelColor = Color(0xFF00E5A3)
-                            )
-                        )
-                        FilterChip(
-                            selected = !fallbackToFixedPosition,
-                            onClick = {
-                                onFallbackToFixedPositionChange(false)
-                                engineSession.updateParameters(fallbackToFixedPosition = false)
-                            },
-                            label = { Text("特徵打碼") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.24f),
-                                selectedLabelColor = Color(0xFF38BDF8)
-                            )
-                        )
-                    }
-
                     if (isProcessing && totalSelectedCount > 0) {
                         LinearProgressIndicator(
                             progress = { completedCount.toFloat() / totalSelectedCount.toFloat() },

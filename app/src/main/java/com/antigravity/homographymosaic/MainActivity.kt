@@ -60,8 +60,7 @@ class MainActivity : ComponentActivity() {
 
         engineSession = MosaicEngineSession(
             initialBlockSize = 32,
-            initialNoiseAmplitude = 18,
-            initialFallbackToFixedPosition = true
+            initialNoiseAmplitude = 18
         )
         templateRepository = TemplateRepository(applicationContext, engineSession)
 
@@ -89,7 +88,6 @@ private fun HomographyMosaicApp(
     templateRepository: TemplateRepository
 ) {
     var learningPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
-    var fallbackToFixedPosition by rememberSaveable { mutableStateOf(true) }
 
     // Sub-1ms FAMTPL02 binary mmap cold-start preload (zero camera permissions needed)
     LaunchedEffect(Unit) {
@@ -139,8 +137,6 @@ private fun HomographyMosaicApp(
                 BatchGalleryScreen(
                     engineSession = engineSession,
                     templateRepository = templateRepository,
-                    fallbackToFixedPosition = fallbackToFixedPosition,
-                    onFallbackToFixedPositionChange = { fallbackToFixedPosition = it },
                     onReferencePhotoPicked = { pickedUri ->
                         learningPhotoUriString = pickedUri.toString()
                     }
