@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -65,6 +66,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
+private val VALID_TEMPLATE_NAME_REGEX =
+    Regex("^[\\u4E00-\\u9FFF\\u3400-\\u4DBF\\uF900-\\uFAFFa-zA-Z0-9]+$")
+
 @Composable
 fun PhotoLearnScreen(
     initialReferenceUri: Uri,
@@ -80,6 +84,7 @@ fun PhotoLearnScreen(
     var referenceUri by remember(initialReferenceUri) { mutableStateOf(initialReferenceUri) }
     var headerInfo by remember { mutableStateOf<JpegHeaderInfo?>(null) }
     var templateName by remember { mutableStateOf("") }
+    var isNameError by remember { mutableStateOf(false) }
     var isLearning by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>("正在載入範例相片...") }
     var isErrorStatus by remember { mutableStateOf(false) }
@@ -103,8 +108,7 @@ fun PhotoLearnScreen(
         }
         if (info.valid && info.uprightWidth > 0 && info.uprightHeight > 0) {
             headerInfo = info
-            statusMessage =
-                "已載入範例相片 (${info.uprightWidth}×${info.uprightHeight})，請直接在相片上拖曳框選要打碼的位置"
+            statusMessage = null
             isErrorStatus = false
         } else {
             headerInfo = null
@@ -116,6 +120,7 @@ fun PhotoLearnScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
+            .imePadding()
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -250,28 +255,27 @@ fun PhotoLearnScreen(
                 ) {
                     OutlinedTextField(
                         value = templateName,
-                        onValueChange = { templateName = it },
+                        onValueChange = {
+                            templateName = it
+                            if (isNameError) isNameError = false
+                        },
                         singleLine = true,
-                        label = { Text("位置名稱（選填）") },
-                        placeholder = { Text("例如：證件號碼 / 固定浮水印") },
+                        isError = isNameError,
+                        label = { Text("範本名稱") },
                         modifier = Modifier.fillMaxWidth()
                     )
-
-                    if (statusMessage != null) {
-                        Text(
-                            text = statusMessage!!,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (isErrorStatus) Color(0xFFF87171) else Color(0xFF94A3B8)
-                        )
-                    }
 
                     val polygons = editorState.simplifiedPolygons
                     Button(
                         enabled = !isLearning && polygons.isNotEmpty(),
                         onClick = {
+                            val trimmedName = templateName.trim()
+                            if (trimmedName.isEmpty() || !VALID_TEMPLATE_NAME_REGEX.matches(trimmedName)) {
+                                isNameError = true
+                                return@Button
+                            }
+                            isNameError = false
                             isLearning = true
-                            statusMessage = "正在學習打碼位置與特徵..."
-                            isErrorStatus = false
                             scope.launch {
                                 val res = withContext(Dispatchers.IO) {
                                     val pfd = context.contentResolver.openFileDescriptor(activeUri, "r")
@@ -280,7 +284,7 @@ fun PhotoLearnScreen(
                                     } else {
                                         pfd.use {
                                             templateRepository.learnAndSaveTemplateFromJpegFd(
-                                                displayName = templateName.trim(),
+                                                displayName = trimmedName,
                                                 inFd = it.fd,
                                                 uprightPolygons = polygons,
                                                 makeExclusiveActive = false
@@ -293,13 +297,10 @@ fun PhotoLearnScreen(
                                     onSuccess = { entry ->
                                         templateName = ""
                                         editorState.clearAll()
-                                        statusMessage =
-                                            "已學習「${entry.displayName}」（特徵點 ${entry.keypointCount}）"
-                                        isErrorStatus = false
                                         onLearnedSuccess(entry)
                                     },
                                     onFailure = { err ->
-                                        statusMessage = err.message ?: "學習失敗"
+                                        statusMessage = err.message ?: "儲存失敗"
                                         isErrorStatus = true
                                     }
                                 )
@@ -314,11 +315,7 @@ fun PhotoLearnScreen(
                         Icon(Icons.Default.AutoFixHigh, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (polygons.isEmpty()) {
-                                "請先在上方相片拖曳框選打碼位置"
-                            } else {
-                                "學習打碼位置（${polygons.size} 區）並前往選取相片"
-                            },
+                            text = "儲存範本",
                             fontWeight = FontWeight.Bold
                         )
                     }
