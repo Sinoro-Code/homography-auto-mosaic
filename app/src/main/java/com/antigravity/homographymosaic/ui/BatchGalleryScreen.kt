@@ -319,16 +319,28 @@ fun BatchGalleryScreen(
                     LazyColumn(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        items(templates, key = { it.id }) { tpl ->
-                            TemplateEntryCard(
-                                entry = tpl,
-                                onToggleEnabled = { enabled ->
-                                    scope.launch { templateRepository.setTemplateEnabled(tpl.id, enabled) }
-                                },
-                                onLongPressDelete = {
-                                    pendingDeleteTemplate = tpl
+                        val rows = templates.chunked(2)
+                        items(rows, key = { row -> row.joinToString("_") { it.id } }) { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                for (tpl in rowItems) {
+                                    TemplateEntryCard(
+                                        entry = tpl,
+                                        onToggleEnabled = { enabled ->
+                                            scope.launch { templateRepository.setTemplateEnabled(tpl.id, enabled) }
+                                        },
+                                        onLongPressDelete = {
+                                            pendingDeleteTemplate = tpl
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
                                 }
-                            )
+                                if (rowItems.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
                         }
                     }
                 }
@@ -383,7 +395,8 @@ fun BatchGalleryScreen(
 private fun TemplateEntryCard(
     entry: FamTemplateEntry,
     onToggleEnabled: (Boolean) -> Unit,
-    onLongPressDelete: () -> Unit
+    onLongPressDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val currentEnabled by rememberUpdatedState(entry.enabled)
     val currentOnToggle by rememberUpdatedState(onToggleEnabled)
@@ -391,9 +404,8 @@ private fun TemplateEntryCard(
 
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = if (entry.enabled) Color(0xFF16A34A) else Color(0xFF334155),
-        modifier = Modifier
-            .fillMaxWidth()
+        color = if (entry.enabled) Color(0xFF16A34A).copy(alpha = 0.35f) else Color(0xFF334155),
+        modifier = modifier
             .pointerInput(entry.id) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -416,13 +428,14 @@ private fun TemplateEntryCard(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            contentAlignment = Alignment.CenterStart
+                .padding(horizontal = 12.dp, vertical = 14.dp),
+            contentAlignment = Alignment.Center
         ) {
             Text(
                 text = entry.displayName,
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
                 color = if (entry.enabled) Color.White else Color(0xFFCBD5E1)
             )
         }
