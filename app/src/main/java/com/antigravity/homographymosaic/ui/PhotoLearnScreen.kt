@@ -80,7 +80,6 @@ fun PhotoLearnScreen(
     var referenceUri by remember(initialReferenceUri) { mutableStateOf(initialReferenceUri) }
     var headerInfo by remember { mutableStateOf<JpegHeaderInfo?>(null) }
     var templateName by remember { mutableStateOf("") }
-    var makeExclusiveActive by remember { mutableStateOf(true) }
     var isLearning by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>("正在載入範例相片...") }
     var isErrorStatus by remember { mutableStateOf(false) }
@@ -249,32 +248,14 @@ fun PhotoLearnScreen(
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = templateName,
-                            onValueChange = { templateName = it },
-                            singleLine = true,
-                            label = { Text("位置名稱（選填）") },
-                            placeholder = { Text("例如：證件號碼 / 固定浮水印") },
-                            modifier = Modifier.weight(1f)
-                        )
-
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = "僅啟用此位置",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFCBD5E1)
-                            )
-                            Switch(
-                                checked = makeExclusiveActive,
-                                onCheckedChange = { makeExclusiveActive = it }
-                            )
-                        }
-                    }
+                    OutlinedTextField(
+                        value = templateName,
+                        onValueChange = { templateName = it },
+                        singleLine = true,
+                        label = { Text("位置名稱（選填）") },
+                        placeholder = { Text("例如：證件號碼 / 固定浮水印") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
 
                     if (statusMessage != null) {
                         Text(
@@ -302,7 +283,7 @@ fun PhotoLearnScreen(
                                                 displayName = templateName.trim(),
                                                 inFd = it.fd,
                                                 uprightPolygons = polygons,
-                                                makeExclusiveActive = makeExclusiveActive
+                                                makeExclusiveActive = false
                                             )
                                         }
                                     }
