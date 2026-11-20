@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -23,11 +24,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.FolderSpecial
-import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.RemoveCircleOutline
@@ -35,17 +33,17 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -81,6 +79,7 @@ data class BatchItemReport(
 private const val FIXED_MOSAIC_BLOCK_SIZE_PX = 32
 private const val FIXED_OUTPUT_JPEG_QUALITY = 85
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BatchGalleryScreen(
     engineSession: MosaicEngineSession,
@@ -97,6 +96,7 @@ fun BatchGalleryScreen(
     var isProcessing by remember { mutableStateOf(false) }
     var completedCount by remember { mutableIntStateOf(0) }
     var totalSelectedCount by remember { mutableIntStateOf(0) }
+    var showTemplatesSheet by remember { mutableStateOf(false) }
     val reports = remember { mutableStateListOf<BatchItemReport>() }
 
     fun launchFdBatch(uris: List<Uri>) {
@@ -142,173 +142,188 @@ fun BatchGalleryScreen(
         if (uris.isNotEmpty()) launchFdBatch(uris)
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        // 1. Photo Selection & Auto-Mosaic Action Card
-        item {
-            Card(
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF131B2E))
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    if (isProcessing && totalSelectedCount > 0) {
-                        LinearProgressIndicator(
-                            progress = { completedCount.toFloat() / totalSelectedCount.toFloat() },
-                            color = Color(0xFF00E5A3),
-                            trackColor = Color(0xFF1E293B),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text(
-                            text = "正在處理 $completedCount / $totalSelectedCount ...",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF00E5A3)
-                        )
-                    }
-
-                    if (activeCount == 0) {
-                        Button(
-                            onClick = {
-                                referencePicker.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF00E5A3),
-                                contentColor = Color(0xFF0B0F17)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // 1. Photo Selection & Auto-Mosaic Action Card
+            if (activeCount > 0 || isProcessing) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF131B2E))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Icon(Icons.Default.ImageSearch, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("建立範本", fontWeight = FontWeight.Bold)
-                        }
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedButton(
-                                enabled = !isProcessing,
-                                onClick = {
-                                    singlePicker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    Icons.Default.Photo,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
+                            if (isProcessing && totalSelectedCount > 0) {
+                                LinearProgressIndicator(
+                                    progress = { completedCount.toFloat() / totalSelectedCount.toFloat() },
+                                    color = Color(0xFF00E5A3),
+                                    trackColor = Color(0xFF1E293B),
+                                    modifier = Modifier.fillMaxWidth()
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("選取單張打碼")
+                                Text(
+                                    text = "正在處理 $completedCount / $totalSelectedCount ...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF00E5A3)
+                                )
                             }
 
-                            Button(
-                                enabled = !isProcessing,
-                                onClick = {
-                                    multiPicker.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF00E5A3),
-                                    contentColor = Color(0xFF0B0F17)
-                                ),
-                                modifier = Modifier.weight(1.35f)
-                            ) {
-                                Icon(
-                                    Icons.Default.PhotoLibrary,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("選取多張自動打碼", fontWeight = FontWeight.Bold)
+                            if (activeCount > 0) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    OutlinedButton(
+                                        enabled = !isProcessing,
+                                        onClick = {
+                                            singlePicker.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Photo,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("選取單張打碼")
+                                    }
+
+                                    Button(
+                                        enabled = !isProcessing,
+                                        onClick = {
+                                            multiPicker.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                            )
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color(0xFF00E5A3),
+                                            contentColor = Color(0xFF0B0F17)
+                                        ),
+                                        modifier = Modifier.weight(1.35f)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.PhotoLibrary,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("選取多張自動打碼", fontWeight = FontWeight.Bold)
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // 2. Learned Mosaic Positions (FAMTPL02 Vault)
-        item {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.FolderSpecial,
-                        contentDescription = null,
-                        tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
+            // 2. Per-Photo Performance Telemetry Reports
+            if (reports.isNotEmpty()) {
+                item {
                     Text(
-                        text = "已學習打碼位置 (${templates.size})",
+                        text = "最近打碼結果明細 (${reports.size})",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFFE2E8F0)
+                        color = Color(0xFFE2E8F0),
+                        modifier = Modifier.padding(top = 6.dp)
                     )
                 }
-
-                TextButton(
-                    onClick = {
-                        referencePicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    }
-                ) {
-                    Icon(
-                        Icons.Default.AddCircleOutline,
-                        contentDescription = null,
-                        tint = Color(0xFF00E5A3),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("建立範本", color = Color(0xFF00E5A3))
+                items(reports, key = { "${it.index}_${it.outputName}" }) { rep ->
+                    BatchTelemetryRow(rep)
                 }
             }
         }
 
-        items(templates, key = { it.id }) { tpl ->
-            TemplateEntryCard(
-                entry = tpl,
-                onToggleEnabled = { enabled ->
-                    scope.launch { templateRepository.setTemplateEnabled(tpl.id, enabled) }
-                },
-                onDelete = {
-                    scope.launch { templateRepository.deleteTemplate(tpl.id) }
-                }
+        // Bottom-left floating button: 範本
+        FloatingActionButton(
+            onClick = { showTemplatesSheet = true },
+            containerColor = Color(0xFF1E293B),
+            contentColor = Color(0xFFE2E8F0),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "範本",
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 20.dp)
             )
         }
 
-        // 3. Per-Photo Performance Telemetry Reports
-        if (reports.isNotEmpty()) {
-            item {
-                Text(
-                    text = "最近打碼結果明細 (${reports.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFFE2E8F0),
-                    modifier = Modifier.padding(top = 6.dp)
+        // Bottom-right floating button: 建立範本
+        FloatingActionButton(
+            onClick = {
+                referencePicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                 )
-            }
-            items(reports, key = { "${it.index}_${it.outputName}" }) { rep ->
-                BatchTelemetryRow(rep)
+            },
+            containerColor = Color(0xFF00E5A3),
+            contentColor = Color(0xFF0B0F17),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "建立範本",
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
+        }
+    }
+
+    if (showTemplatesSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showTemplatesSheet = false },
+            containerColor = Color(0xFF0F172A)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "範本",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+
+                if (templates.isEmpty()) {
+                    Text(
+                        text = "尚未建立範本",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color(0xFF94A3B8),
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(templates, key = { it.id }) { tpl ->
+                            TemplateEntryCard(
+                                entry = tpl,
+                                onToggleEnabled = { enabled ->
+                                    scope.launch { templateRepository.setTemplateEnabled(tpl.id, enabled) }
+                                },
+                                onDelete = {
+                                    scope.launch { templateRepository.deleteTemplate(tpl.id) }
+                                }
+                            )
+                        }
+                    }
+                }
             }
         }
     }
