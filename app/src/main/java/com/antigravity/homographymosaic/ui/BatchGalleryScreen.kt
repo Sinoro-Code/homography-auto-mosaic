@@ -9,6 +9,9 @@ import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,10 +28,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.RemoveCircleOutline
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -36,14 +39,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -52,12 +54,17 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.antigravity.homographymosaic.core.FamTemplateEntry
 import com.antigravity.homographymosaic.core.GalleryJpegTelemetry
@@ -97,6 +104,7 @@ fun BatchGalleryScreen(
     var completedCount by remember { mutableIntStateOf(0) }
     var totalSelectedCount by remember { mutableIntStateOf(0) }
     var showTemplatesSheet by remember { mutableStateOf(false) }
+    var pendingDeleteTemplate by remember { mutableStateOf<FamTemplateEntry?>(null) }
     val reports = remember { mutableStateListOf<BatchItemReport>() }
 
     fun launchFdBatch(uris: List<Uri>) {
@@ -297,7 +305,7 @@ fun BatchGalleryScreen(
                     text = "範本",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    color = Color(0xFF00E5A3)
                 )
 
                 if (templates.isEmpty()) {
@@ -317,8 +325,8 @@ fun BatchGalleryScreen(
                                 onToggleEnabled = { enabled ->
                                     scope.launch { templateRepository.setTemplateEnabled(tpl.id, enabled) }
                                 },
-                                onDelete = {
-                                    scope.launch { templateRepository.deleteTemplate(tpl.id) }
+                                onLongPressDelete = {
+                                    pendingDeleteTemplate = tpl
                                 }
                             )
                         }
@@ -327,51 +335,96 @@ fun BatchGalleryScreen(
             }
         }
     }
+
+    val deleteTarget = pendingDeleteTemplate
+    if (deleteTarget != null) {
+        AlertDialog(
+            onDismissRequest = { pendingDeleteTemplate = null },
+            containerColor = Color(0xFF131B2E),
+            text = {
+                Text(
+                    text = buildAnnotatedString {
+                        append("確定刪除 ")
+                        withStyle(
+                            SpanStyle(
+                                color = Color(0xFFF87171),
+                                fontWeight = FontWeight.Bold
+                            )
+                        ) {
+                            append(deleteTarget.displayName)
+                        }
+                        append(" 範本?")
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.White
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val idToDelete = deleteTarget.id
+                        pendingDeleteTemplate = null
+                        scope.launch { templateRepository.deleteTemplate(idToDelete) }
+                    }
+                ) {
+                    Text("刪除", color = Color(0xFFF87171), fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteTemplate = null }) {
+                    Text("取消", color = Color(0xFF94A3B8))
+                }
+            }
+        )
+    }
 }
 
 @Composable
 private fun TemplateEntryCard(
     entry: FamTemplateEntry,
     onToggleEnabled: (Boolean) -> Unit,
-    onDelete: () -> Unit
+    onLongPressDelete: () -> Unit
 ) {
+    val currentEnabled by rememberUpdatedState(entry.enabled)
+    val currentOnToggle by rememberUpdatedState(onToggleEnabled)
+    val currentOnLongPress by rememberUpdatedState(onLongPressDelete)
+
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = Color(0xFF111827),
-        modifier = Modifier.fillMaxWidth()
+        color = if (entry.enabled) Color(0xFF16A34A) else Color(0xFF334155),
+        modifier = Modifier
+            .fillMaxWidth()
+            .pointerInput(entry.id) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var longPressTriggered = false
+                    val upEvent = withTimeoutOrNull(500L) {
+                        waitForUpOrCancellation()
+                    }
+                    if (upEvent == null) {
+                        // Still pressed after 0.5s -> trigger delete confirmation
+                        longPressTriggered = true
+                        currentOnLongPress()
+                        waitForUpOrCancellation()
+                    } else if (!longPressTriggered) {
+                        // Released within 0.5s -> toggle enabled state
+                        currentOnToggle(!currentEnabled)
+                    }
+                }
+            }
     ) {
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            contentAlignment = Alignment.CenterStart
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = entry.displayName,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White
-                )
-                Text(
-                    text = "區域:${entry.polygonCount}處(${entry.vertexCount}點) · 特徵:${entry.keypointCount} · " +
-                        "${"%.1f".format(entry.fileBytes / 1024.0)}KB · 載入:${entry.lastMmapLoadUs}µs",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF94A3B8)
-                )
-            }
-            Switch(
-                checked = entry.enabled,
-                onCheckedChange = onToggleEnabled
+            Text(
+                text = entry.displayName,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = if (entry.enabled) Color.White else Color(0xFFCBD5E1)
             )
-            IconButton(onClick = onDelete) {
-                Icon(
-                    Icons.Default.DeleteOutline,
-                    contentDescription = "刪除此打碼位置",
-                    tint = Color(0xFFF87171)
-                )
-            }
         }
     }
 }
