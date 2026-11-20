@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.ImageSearch
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -179,44 +180,27 @@ fun PhotoLearnScreen(
                 }
             }
         } else {
-            // Top bar: back button + photo dimensions + switch reference photo
+            // Top bar: back button on left, undo button on right
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onCancel) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回",
-                            tint = Color.White
-                        )
-                    }
-                    Text(
-                        text = "範例相片 ${activeHeader.uprightWidth}×${activeHeader.uprightHeight}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color(0xFF94A3B8)
+                IconButton(onClick = onCancel) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "返回",
+                        tint = Color.White
                     )
                 }
-                OutlinedButton(
-                    onClick = {
-                        referencePicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    }
-                ) {
+                IconButton(onClick = { editorState.undoLast() }) {
                     Icon(
-                        Icons.Default.ImageSearch,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
+                        imageVector = Icons.Default.Undo,
+                        contentDescription = "復原",
+                        tint = Color.White
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("更換範例相片", style = MaterialTheme.typography.labelMedium)
                 }
             }
-
-            PolygonLearnToolbar(state = editorState)
 
             // Aspect-ratio-locked ANativeWindow Surface preview + 1:1 PolygonLearnCanvas
             BoxWithConstraints(

@@ -315,89 +315,169 @@ fun PolygonLearnCanvas(
         modifier = modifier
             .fillMaxSize()
             .onSizeChanged { state.canvasSize = it }
-            .pointerInput(state.inputMode, state.canvasSize) {
-                when (state.inputMode) {
-                    PolygonInputMode.RECTANGLE_DRAG -> {
-                        detectDragGestures(
-                            onDragStart = { start ->
-                                state.rectDragStart = start
-                                state.rectDragEnd = start
-                            },
-                            onDrag = { change, _ ->
-                                change.consume()
-                                state.rectDragEnd = change.position
-                            },
-                            onDragEnd = {
-                                val s = state.rectDragStart
-                                val e = state.rectDragEnd
-                                val w = state.canvasSize.width.toFloat()
-                                val h = state.canvasSize.height.toFloat()
-                                if (s != null && e != null && w > 0f && h > 0f &&
-                                    abs(e.x - s.x) >= 8f && abs(e.y - s.y) >= 8f
-                                ) {
-                                    val x0 = (min(s.x, e.x) / w).coerceIn(0f, 1f)
-                                    val y0 = (min(s.y, e.y) / h).coerceIn(0f, 1f)
-                                    val x1 = (max(s.x, e.x) / w).coerceIn(0f, 1f)
-                                    val y1 = (max(s.y, e.y) / h).coerceIn(0f, 1f)
-                                    state.rawPolygons.add(
-                                        listOf(
-                                            NormalizedPoint(x0, y0),
-                                            NormalizedPoint(x1, y0),
-                                            NormalizedPoint(x1, y1),
-                                            NormalizedPoint(x0, y1)
-                                        ) to false
-                                    )
-                                }
-                                state.rectDragStart = null
-                                state.rectDragEnd = null
-                            },
-                            onDragCancel = {
-                                state.rectDragStart = null
-                                state.rectDragEnd = null
-                            }
-                        )
-                    }
+            .pointerInput(state.canvasSize) {
+                val cornerHitRadiusPx = 28.dp.toPx()
+                val minRectNorm = 0.02f
 
-                    PolygonInputMode.FINGER_LASSO -> {
-                        detectDragGestures(
-                            onDragStart = { start ->
-                                state.activePoints.clear()
-                                state.activePoints.add(start)
-                            },
-                            onDrag = { change, _ ->
-                                change.consume()
-                                val pos = change.position
-                                val last = state.activePoints.lastOrNull()
-                                if (last == null || hypot(pos.x - last.x, pos.y - last.y) >= 5f) {
-                                    state.activePoints.add(pos)
-                                }
-                            },
-                            onDragEnd = {
-                                val w = state.canvasSize.width.toFloat()
-                                val h = state.canvasSize.height.toFloat()
-                                if (state.activePoints.size >= 3 && w > 0f && h > 0f) {
-                                    val normalized = state.activePoints.map { pt ->
-                                        NormalizedPoint(
-                                            (pt.x / w).coerceIn(0f, 1f),
-                                            (pt.y / h).coerceIn(0f, 1f)
-                                        )
-                                    }
-                                    state.rawPolygons.add(normalized to true)
-                                }
-                                state.activePoints.clear()
-                            },
-                            onDragCancel = {
-                                state.activePoints.clear()
-                            }
-                        )
-                    }
+                // Active drag interaction state
+                var activeMode = 0 // 0=none, 1=drawNew, 2=resizeCorner, 3=moveRect
+                var activeRectIdx = -1
+                var anchorNormX = 0f
+                var anchorNormY = 0f
 
-                    PolygonInputMode.TAP_VERTICES -> {
-                        detectTapGestures { tapOffset ->
-                            state.activePoints.add(tapOffset)
+                detectDragGestures(
+                    onDragStart = { start ->
+                        val w = state.canvasSize.width.toFloat()
+                        val h = state.canvasSize.height.toFloat()
+                        if (w <= 0f || h <= 0f) return@detectDragGestures
+
+                        activeMode = 0
+                        activeRectIdx = -1
+
+                        // 1. Hit-test 4 corners of existing rectangles (topmost first)
+                        for (idx in state.rawPolygons.lastIndex downTo 0) {
+                            val pts = state.rawPolygons[idx].first
+                            if (pts.size != 4) continue
+                            var bestCorner = -1
+                            var bestDist = cornerHitRadiusPx
+                            for (c in 0..3) {
+                                val cx = pts[c].x * w
+                                val cy = pts[c].y * h
+                                val d = hypot(start.x - cx, start.y - cy)
+                                if (d <= bestDist) {
+                                    bestDist = d
+                                    bestCorner = c
+                                }
+                            }
+                            if (bestCorner >= 0) {
+                                activeMode = 2
+                                activeRectIdx = idx
+                                // Opposite corner stays anchored while dragging this corner
+                                val opp = (bestCorner + 2) % 4
+                                anchorNormX = pts[opp].x
+                                anchorNormY = pts[opp].y
+                                break
+                            }
                         }
+
+                        // 2. Hit-test interior of existing rectangles (topmost first) for drag-to-move
+                        if (activeMode == 0) {
+                            for (idx in state.rawPolygons.lastIndex downTo 0) {
+                                val pts = state.rawPolygons[idx].first
+                                if (pts.size != 4) continue
+                                val minX = pts.minOf { it.x } * w
+                                val maxX = pts.maxOf { it.x } * w
+                                val minY = pts.minOf { it.y } * h
+                                val maxY = pts.maxOf { it.y } * h
+                                if (start.x in minX..maxX && start.y in minY..maxY) {
+                                    activeMode = 3
+                                    activeRectIdx = idx
+                                    break
+                                }
+                            }
+                        }
+
+                        // 3. Otherwise start drawing a new rectangle
+                        if (activeMode == 0) {
+                            activeMode = 1
+                            state.rectDragStart = start
+                            state.rectDragEnd = start
+                        }
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        val w = state.canvasSize.width.toFloat()
+                        val h = state.canvasSize.height.toFloat()
+                        if (w <= 0f || h <= 0f) return@detectDragGestures
+
+                        when (activeMode) {
+                            1 -> {
+                                state.rectDragEnd = change.position
+                            }
+                            2 -> {
+                                if (activeRectIdx in state.rawPolygons.indices) {
+                                    val curX = (change.position.x / w).coerceIn(0f, 1f)
+                                    val curY = (change.position.y / h).coerceIn(0f, 1f)
+                                    var x0 = min(anchorNormX, curX)
+                                    var x1 = max(anchorNormX, curX)
+                                    var y0 = min(anchorNormY, curY)
+                                    var y1 = max(anchorNormY, curY)
+                                    if (x1 - x0 < minRectNorm) {
+                                        if (curX >= anchorNormX) x1 = (x0 + minRectNorm).coerceAtMost(1f)
+                                        else x0 = (x1 - minRectNorm).coerceAtLeast(0f)
+                                    }
+                                    if (y1 - y0 < minRectNorm) {
+                                        if (curY >= anchorNormY) y1 = (y0 + minRectNorm).coerceAtMost(1f)
+                                        else y0 = (y1 - minRectNorm).coerceAtLeast(0f)
+                                    }
+                                    state.rawPolygons[activeRectIdx] = listOf(
+                                        NormalizedPoint(x0, y0),
+                                        NormalizedPoint(x1, y0),
+                                        NormalizedPoint(x1, y1),
+                                        NormalizedPoint(x0, y1)
+                                    ) to false
+                                }
+                            }
+                            3 -> {
+                                if (activeRectIdx in state.rawPolygons.indices) {
+                                    val pts = state.rawPolygons[activeRectIdx].first
+                                    if (pts.size == 4) {
+                                        val x0 = pts.minOf { it.x }
+                                        val x1 = pts.maxOf { it.x }
+                                        val y0 = pts.minOf { it.y }
+                                        val y1 = pts.maxOf { it.y }
+                                        val dx = (dragAmount.x / w).coerceIn(-x0, 1f - x1)
+                                        val dy = (dragAmount.y / h).coerceIn(-y0, 1f - y1)
+                                        val nx0 = x0 + dx
+                                        val nx1 = x1 + dx
+                                        val ny0 = y0 + dy
+                                        val ny1 = y1 + dy
+                                        state.rawPolygons[activeRectIdx] = listOf(
+                                            NormalizedPoint(nx0, ny0),
+                                            NormalizedPoint(nx1, ny0),
+                                            NormalizedPoint(nx1, ny1),
+                                            NormalizedPoint(nx0, ny1)
+                                        ) to false
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onDragEnd = {
+                        if (activeMode == 1) {
+                            val s = state.rectDragStart
+                            val e = state.rectDragEnd
+                            val w = state.canvasSize.width.toFloat()
+                            val h = state.canvasSize.height.toFloat()
+                            if (s != null && e != null && w > 0f && h > 0f &&
+                                abs(e.x - s.x) >= 8f && abs(e.y - s.y) >= 8f
+                            ) {
+                                val x0 = (min(s.x, e.x) / w).coerceIn(0f, 1f)
+                                val y0 = (min(s.y, e.y) / h).coerceIn(0f, 1f)
+                                val x1 = (max(s.x, e.x) / w).coerceIn(0f, 1f)
+                                val y1 = (max(s.y, e.y) / h).coerceIn(0f, 1f)
+                                state.rawPolygons.add(
+                                    listOf(
+                                        NormalizedPoint(x0, y0),
+                                        NormalizedPoint(x1, y0),
+                                        NormalizedPoint(x1, y1),
+                                        NormalizedPoint(x0, y1)
+                                    ) to false
+                                )
+                            }
+                        }
+                        activeMode = 0
+                        activeRectIdx = -1
+                        state.rectDragStart = null
+                        state.rectDragEnd = null
+                    },
+                    onDragCancel = {
+                        activeMode = 0
+                        activeRectIdx = -1
+                        state.rectDragStart = null
+                        state.rectDragEnd = null
                     }
-                }
+                )
             }
     ) {
         val w = size.width
@@ -429,12 +509,12 @@ fun PolygonLearnCanvas(
             for (v in poly) {
                 drawCircle(
                     color = Color(0xFF0B0F17),
-                    radius = 5.5.dp.toPx(),
+                    radius = 7.dp.toPx(),
                     center = Offset(v.x * w, v.y * h)
                 )
                 drawCircle(
                     color = Color(0xFF38BDF8),
-                    radius = 3.8.dp.toPx(),
+                    radius = 4.8.dp.toPx(),
                     center = Offset(v.x * w, v.y * h)
                 )
             }
@@ -443,7 +523,7 @@ fun PolygonLearnCanvas(
         // Draw live rectangle drag preview
         val rStart = state.rectDragStart
         val rEnd = state.rectDragEnd
-        if (state.inputMode == PolygonInputMode.RECTANGLE_DRAG && rStart != null && rEnd != null) {
+        if (rStart != null && rEnd != null) {
             val left = min(rStart.x, rEnd.x).coerceIn(0f, w)
             val top = min(rStart.y, rEnd.y).coerceIn(0f, h)
             val right = max(rStart.x, rEnd.x).coerceIn(0f, w)

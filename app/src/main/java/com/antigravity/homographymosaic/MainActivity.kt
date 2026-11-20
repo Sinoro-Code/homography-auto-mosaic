@@ -109,7 +109,7 @@ private fun HomographyMosaicApp(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "自碼系統",
+                        text = if (learningPhotoUriString != null) "建立範本" else "自碼系統",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
