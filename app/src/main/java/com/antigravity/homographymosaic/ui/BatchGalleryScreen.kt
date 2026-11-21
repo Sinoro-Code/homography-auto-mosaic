@@ -462,14 +462,12 @@ private fun BatchTelemetryRow(report: BatchItemReport) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            if (matched) {
-                Text(
-                    text = report.timestampText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFCBD5E1),
-                    maxLines = 1
-                )
-            }
+            Text(
+                text = report.timestampText,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFCBD5E1),
+                maxLines = 1
+            )
         }
     }
 }
@@ -518,7 +516,7 @@ private suspend fun processSingleUriFdToFd(
         }
     } ?: GalleryJpegTelemetry(false, false, 0, 0, 0L, 0L, 0L, 0L, 0L, 0L, 0, 0, 0)
 
-    if (telemetry.ioSuccess) {
+    if (telemetry.ioSuccess && telemetry.matchedAny) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val ready = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
             resolver.update(outUri, ready, null, null)
