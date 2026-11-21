@@ -31,10 +31,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Photo
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.RemoveCircleOutline
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -43,7 +41,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -60,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -67,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -427,61 +426,40 @@ private fun TemplateEntryCard(
 
 @Composable
 private fun BatchTelemetryRow(report: BatchItemReport) {
-    val t = report.telemetry
-    val decMs = t.jpegDecodeUs / 1000.0
-    val orbMs = t.homographyAndOrbUs / 1000.0
-    val mosMs = t.neonMosaicUs / 1000.0
-    val encMs = t.jpegEncodeUs / 1000.0
-    val totMs = t.totalUs / 1000.0
+    val matched = report.telemetry.matchedAny
+    val accent = if (matched) TacticalAccentPrimary else Color(0xFFEF4444)
+    val bgColor = accent.copy(alpha = 0.26f).compositeOver(TacticalBaseBg)
+    val shape = RoundedCornerShape(14.dp)
 
-    val alignDesc = when {
-        !t.matchedAny -> "未套用"
-        t.bestInliers > 0 && t.fixedPositionApplied == 0 -> "單應性追蹤(內點:${t.bestInliers})"
-        t.bestInliers == 0 && t.fixedPositionApplied > 0 -> "學習位置直接套用"
-        else -> "追蹤+位置(${t.templatesMatched}組)"
-    }
-
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = Color(0xFF0F172A),
-        modifier = Modifier.fillMaxWidth()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(bgColor)
+            .border(1.dp, accent, shape)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = if (t.matchedAny) {
-                    Icons.Default.CheckCircle
-                } else {
-                    Icons.Default.RemoveCircleOutline
-                },
-                contentDescription = null,
-                tint = if (t.matchedAny) Color(0xFF00E5A3) else Color(0xFF64748B),
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "${report.outputName} (${t.width}×${t.height}) · $alignDesc",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White
-                )
-                Text(
-                    text = if (t.ioSuccess) {
-                        "直解:${"%.1f".format(decMs)}ms | 對位:${"%.2f".format(orbMs)}ms | " +
-                            "NEON打碼:${"%.2f".format(mosMs)}ms | 直壓:${"%.1f".format(encMs)}ms | 總計:${"%.1f".format(totMs)}ms"
-                    } else {
-                        "略過（無法解析此影像格式或讀取失敗）"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF94A3B8)
-                )
-            }
-        }
+        Icon(
+            imageVector = if (matched) {
+                Icons.Default.RadioButtonUnchecked
+            } else {
+                Icons.Default.Close
+            },
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = report.outputName,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+            color = TacticalTextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
