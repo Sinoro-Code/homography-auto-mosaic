@@ -404,7 +404,7 @@ private fun TemplateEntryCard(
 
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = if (entry.enabled) Color(0xFF16A34A).copy(alpha = 0.20f) else Color(0xFF334155),
+        color = if (entry.enabled) Color(0xFF16A34A).copy(alpha = 0.10f) else Color(0xFF334155),
         modifier = modifier
             .pointerInput(entry.id) {
                 awaitEachGesture {
