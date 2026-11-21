@@ -84,7 +84,8 @@ import java.util.Locale
 data class BatchItemReport(
     val index: Int,
     val outputName: String,
-    val telemetry: GalleryJpegTelemetry
+    val telemetry: GalleryJpegTelemetry,
+    val timestampText: String = SimpleDateFormat("yyyy-MM-dd | HH : mm : ss", Locale.US).format(Date())
 )
 
 private const val FIXED_MOSAIC_BLOCK_SIZE_PX = 32
@@ -107,6 +108,7 @@ fun BatchGalleryScreen(
     var isProcessing by remember { mutableStateOf(false) }
     var completedCount by remember { mutableIntStateOf(0) }
     var totalSelectedCount by remember { mutableIntStateOf(0) }
+    var nextReportId by remember { mutableIntStateOf(1) }
     var showTemplatesSheet by remember { mutableStateOf(false) }
     var pendingDeleteTemplate by remember { mutableStateOf<FamTemplateEntry?>(null) }
     val reports = remember { mutableStateListOf<BatchItemReport>() }
@@ -116,15 +118,15 @@ fun BatchGalleryScreen(
         isProcessing = true
         completedCount = 0
         totalSelectedCount = uris.size
-        reports.clear()
 
         scope.launch {
             for ((idx, srcUri) in uris.withIndex()) {
+                val reportId = nextReportId++
                 val report = processSingleUriFdToFd(
                     context = context,
                     engineSession = engineSession,
                     sourceUri = srcUri,
-                    itemIndex = idx + 1,
+                    itemIndex = reportId,
                     jpegQuality = FIXED_OUTPUT_JPEG_QUALITY,
                     blockSize = FIXED_MOSAIC_BLOCK_SIZE_PX
                 )
@@ -451,15 +453,24 @@ private fun BatchTelemetryRow(report: BatchItemReport) {
             modifier = Modifier.size(18.dp)
         )
         Spacer(modifier = Modifier.width(10.dp))
-        Text(
-            text = report.outputName,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Bold,
-            color = TacticalTextPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = report.outputName,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = TacticalTextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (matched) {
+                Text(
+                    text = report.timestampText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFCBD5E1),
+                    maxLines = 1
+                )
+            }
+        }
     }
 }
 
