@@ -158,27 +158,22 @@ fun PhotoLearnScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            OutlinedButton(
+                            TacticalCapsuleButton(
                                 onClick = onCancel,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Text("返回")
                             }
-                            Button(
+                            TacticalCapsuleButton(
                                 onClick = {
                                     referencePicker.launch(
                                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                     )
                                 },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF00E5A3),
-                                    contentColor = Color(0xFF0B0F17)
-                                ),
                                 modifier = Modifier.weight(1.4f)
                             ) {
                                 Icon(Icons.Default.ImageSearch, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("重選範例相片", fontWeight = FontWeight.Bold)
+                                Text("重選範例相片")
                             }
                         }
                     }
@@ -191,18 +186,24 @@ fun PhotoLearnScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                IconButton(onClick = onCancel) {
+                TacticalCapsuleButton(
+                    onClick = onCancel,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "返回",
-                        tint = Color.White
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-                IconButton(onClick = { editorState.undoLast() }) {
+                TacticalCapsuleButton(
+                    onClick = { editorState.undoLast() },
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
                     Icon(
                         imageVector = Icons.Default.Undo,
                         contentDescription = "復原",
-                        tint = Color.White
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
@@ -265,13 +266,13 @@ fun PhotoLearnScreen(
                             singleLine = true,
                             isError = isNameError,
                             trailingIcon = {
-                                Button(
+                                TacticalCapsuleButton(
                                     enabled = !isLearning && polygons.isNotEmpty(),
                                     onClick = {
                                         val trimmedName = templateName.trim()
                                         if (trimmedName.isEmpty() || !VALID_TEMPLATE_NAME_REGEX.matches(trimmedName)) {
                                             isNameError = true
-                                            return@Button
+                                            return@TacticalCapsuleButton
                                         }
                                         isNameError = false
                                         isLearning = true
@@ -305,19 +306,10 @@ fun PhotoLearnScreen(
                                             )
                                         }
                                     },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF00E5A3),
-                                        contentColor = Color(0xFF0B0F17)
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 7.dp),
                                     modifier = Modifier.padding(end = 6.dp)
                                 ) {
-                                    Text(
-                                        text = "儲存範本",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Text("儲存範本")
                                 }
                             },
                             modifier = Modifier

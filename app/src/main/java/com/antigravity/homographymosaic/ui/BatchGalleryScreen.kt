@@ -9,6 +9,10 @@ import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -32,20 +36,15 @@ import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -58,14 +57,20 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import com.antigravity.homographymosaic.core.FamTemplateEntry
 import com.antigravity.homographymosaic.core.GalleryJpegTelemetry
 import com.antigravity.homographymosaic.core.MosaicEngineSession
@@ -188,7 +193,7 @@ fun BatchGalleryScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    OutlinedButton(
+                                    TacticalCapsuleButton(
                                         enabled = !isProcessing,
                                         onClick = {
                                             singlePicker.launch(
@@ -202,21 +207,16 @@ fun BatchGalleryScreen(
                                             contentDescription = null,
                                             modifier = Modifier.size(18.dp)
                                         )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("選取單張打碼")
+                                        Text("選取單張打碼", maxLines = 1)
                                     }
 
-                                    Button(
+                                    TacticalCapsuleButton(
                                         enabled = !isProcessing,
                                         onClick = {
                                             multiPicker.launch(
                                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                             )
                                         },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = Color(0xFF00E5A3),
-                                            contentColor = Color(0xFF0B0F17)
-                                        ),
                                         modifier = Modifier.weight(1.35f)
                                     ) {
                                         Icon(
@@ -224,8 +224,7 @@ fun BatchGalleryScreen(
                                             contentDescription = null,
                                             modifier = Modifier.size(18.dp)
                                         )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("選取多張自動打碼", fontWeight = FontWeight.Bold)
+                                        Text("選取多張自動打碼", maxLines = 1)
                                     }
                                 }
                             }
@@ -252,41 +251,27 @@ fun BatchGalleryScreen(
         }
 
         // Bottom-left floating button: 範本
-        FloatingActionButton(
+        TacticalCapsuleButton(
             onClick = { showTemplatesSheet = true },
-            containerColor = Color(0xFF1E293B),
-            contentColor = Color(0xFFE2E8F0),
-            shape = RoundedCornerShape(16.dp),
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(16.dp)
         ) {
-            Text(
-                text = "範本",
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 20.dp)
-            )
+            Text("範本")
         }
 
         // Bottom-right floating button: 建立範本
-        FloatingActionButton(
+        TacticalCapsuleButton(
             onClick = {
                 referencePicker.launch(
                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                 )
             },
-            containerColor = Color(0xFF00E5A3),
-            contentColor = Color(0xFF0B0F17),
-            shape = RoundedCornerShape(16.dp),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(16.dp)
         ) {
-            Text(
-                text = "建立範本",
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 20.dp)
-            )
+            Text("建立範本")
         }
     }
 
@@ -372,19 +357,24 @@ fun BatchGalleryScreen(
                 )
             },
             confirmButton = {
-                TextButton(
+                TacticalCapsuleButton(
                     onClick = {
                         val idToDelete = deleteTarget.id
                         pendingDeleteTemplate = null
                         scope.launch { templateRepository.deleteTemplate(idToDelete) }
-                    }
+                    },
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                 ) {
-                    Text("刪除", color = Color(0xFFF87171), fontWeight = FontWeight.Bold)
+                    Text("刪除", color = Color(0xFFF87171))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDeleteTemplate = null }) {
-                    Text("取消", color = Color(0xFF94A3B8))
+                TacticalCapsuleButton(
+                    onClick = { pendingDeleteTemplate = null },
+                    inactiveGray = true,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Text("取消")
                 }
             }
         )
@@ -398,47 +388,77 @@ private fun TemplateEntryCard(
     onLongPressDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isCompact = LocalConfiguration.current.screenWidthDp <= 380
+    val resolvedPadding = if (isCompact) {
+        PaddingValues(horizontal = 16.dp, vertical = 9.dp)
+    } else {
+        PaddingValues(horizontal = 22.dp, vertical = 10.dp)
+    }
+    val fontSize = if (isCompact) 13.sp else 14.sp
+
     val currentEnabled by rememberUpdatedState(entry.enabled)
     val currentOnToggle by rememberUpdatedState(onToggleEnabled)
     val currentOnLongPress by rememberUpdatedState(onLongPressDelete)
+    var isPressed by remember { mutableStateOf(false) }
 
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = if (entry.enabled) Color(0xFF16A34A).copy(alpha = 0.70f) else Color(0xFF334155),
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.97f else 1f,
+        animationSpec = tween(durationMillis = 120),
+        label = "tplScale"
+    )
+    val (bgColor, borderColor) = tacticalCapsuleColors(
+        pressed = isPressed,
+        selected = entry.enabled,
+        inactiveGray = !entry.enabled
+    )
+
+    Box(
         modifier = modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .shadow(
+                elevation = 12.dp,
+                shape = TacticalCapsuleShape,
+                ambientColor = Color.Black.copy(alpha = 0.5f),
+                spotColor = Color.Black.copy(alpha = 0.5f)
+            )
+            .clip(TacticalCapsuleShape)
+            .background(bgColor)
+            .border(1.dp, borderColor, TacticalCapsuleShape)
             .pointerInput(entry.id) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
-                    var longPressTriggered = false
-                    val upEvent = withTimeoutOrNull(500L) {
-                        waitForUpOrCancellation()
-                    }
-                    if (upEvent == null) {
-                        // Still pressed after 0.5s -> trigger delete confirmation
-                        longPressTriggered = true
-                        currentOnLongPress()
-                        waitForUpOrCancellation()
-                    } else if (!longPressTriggered) {
-                        // Released within 0.5s -> toggle enabled state
-                        currentOnToggle(!currentEnabled)
+                    isPressed = true
+                    try {
+                        var longPressTriggered = false
+                        val upEvent = withTimeoutOrNull(500L) {
+                            waitForUpOrCancellation()
+                        }
+                        if (upEvent == null) {
+                            longPressTriggered = true
+                            currentOnLongPress()
+                            waitForUpOrCancellation()
+                        } else if (!longPressTriggered) {
+                            currentOnToggle(!currentEnabled)
+                        }
+                    } finally {
+                        isPressed = false
                     }
                 }
             }
+            .padding(resolvedPadding),
+        contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 14.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = entry.displayName,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                color = if (entry.enabled) Color.White else Color(0xFFCBD5E1)
-            )
-        }
+        Text(
+            text = entry.displayName,
+            fontSize = fontSize,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.03.em,
+            maxLines = 1,
+            color = if (entry.enabled) TacticalTextPrimary else Color(0xFFCBD5E1)
+        )
     }
 }
 
