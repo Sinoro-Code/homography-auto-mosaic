@@ -192,15 +192,6 @@ fun BatchGalleryScreen(
 
             // 2. Per-Photo Performance Telemetry Reports
             if (reports.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "最近打碼結果明細 (${reports.size})",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFFE2E8F0),
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                }
                 items(reports, key = { "${it.index}_${it.outputName}" }) { rep ->
                     BatchTelemetryRow(rep)
                 }
