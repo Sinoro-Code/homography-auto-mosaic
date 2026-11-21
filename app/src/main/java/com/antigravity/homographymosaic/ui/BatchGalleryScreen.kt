@@ -161,8 +161,8 @@ fun BatchGalleryScreen(
             contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Photo Selection & Auto-Mosaic Action Card
-            if (activeCount > 0 || isProcessing) {
+            // 1. Progress Card (shown only while processing)
+            if (isProcessing && totalSelectedCount > 0) {
                 item {
                     Card(
                         shape = RoundedCornerShape(20.dp),
@@ -172,62 +172,19 @@ fun BatchGalleryScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            if (isProcessing && totalSelectedCount > 0) {
-                                LinearProgressIndicator(
-                                    progress = { completedCount.toFloat() / totalSelectedCount.toFloat() },
-                                    color = Color(0xFF00E5A3),
-                                    trackColor = Color(0xFF1E293B),
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Text(
-                                    text = "正在處理 $completedCount / $totalSelectedCount ...",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF00E5A3)
-                                )
-                            }
-
-                            if (activeCount > 0) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    TacticalCapsuleButton(
-                                        enabled = !isProcessing,
-                                        onClick = {
-                                            singlePicker.launch(
-                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                            )
-                                        },
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Photo,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Text("選取單張打碼", maxLines = 1)
-                                    }
-
-                                    TacticalCapsuleButton(
-                                        enabled = !isProcessing,
-                                        onClick = {
-                                            multiPicker.launch(
-                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                            )
-                                        },
-                                        modifier = Modifier.weight(1.35f)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.PhotoLibrary,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Text("選取多張自動打碼", maxLines = 1)
-                                    }
-                                }
-                            }
+                            LinearProgressIndicator(
+                                progress = { completedCount.toFloat() / totalSelectedCount.toFloat() },
+                                color = Color(0xFF00E5A3),
+                                trackColor = Color(0xFF1E293B),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                text = "正在處理 $completedCount / $totalSelectedCount ...",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF00E5A3)
+                            )
                         }
                     }
                 }
@@ -260,7 +217,7 @@ fun BatchGalleryScreen(
             Text("範本")
         }
 
-        // Bottom-right floating button: 建立範本
+        // Bottom-center floating button: 建立範本
         TacticalCapsuleButton(
             onClick = {
                 referencePicker.launch(
@@ -268,10 +225,25 @@ fun BatchGalleryScreen(
                 )
             },
             modifier = Modifier
-                .align(Alignment.BottomEnd)
+                .align(Alignment.BottomCenter)
                 .padding(16.dp)
         ) {
             Text("建立範本")
+        }
+
+        // Bottom-right floating button: 上碼相片
+        TacticalCapsuleButton(
+            enabled = activeCount > 0 && !isProcessing,
+            onClick = {
+                multiPicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp)
+        ) {
+            Text("上碼相片")
         }
     }
 
