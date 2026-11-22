@@ -223,19 +223,21 @@ fun BatchGalleryScreen(
             Text("建立範本")
         }
 
-        // Bottom-right floating button: 上碼相片
-        TacticalCapsuleButton(
-            enabled = activeCount > 0 && !isProcessing,
-            onClick = {
-                multiPicker.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
-            },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp)
-        ) {
-            Text("上碼相片")
+        // Bottom-right floating button: 上碼相片 (hidden when no templates exist)
+        if (templates.isNotEmpty()) {
+            TacticalCapsuleButton(
+                enabled = activeCount > 0 && !isProcessing,
+                onClick = {
+                    multiPicker.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+            ) {
+                Text("上碼相片")
+            }
         }
     }
 
