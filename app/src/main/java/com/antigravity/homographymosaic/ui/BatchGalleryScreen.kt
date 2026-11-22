@@ -223,10 +223,10 @@ fun BatchGalleryScreen(
             Text("建立範本")
         }
 
-        // Bottom-right floating button: 上碼相片 (hidden when no templates exist)
-        if (templates.isNotEmpty()) {
+        // Bottom-right floating button: 上碼相片 (hidden when no active templates exist)
+        if (activeCount > 0) {
             TacticalCapsuleButton(
-                enabled = activeCount > 0 && !isProcessing,
+                enabled = !isProcessing,
                 onClick = {
                     multiPicker.launch(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
