@@ -4,6 +4,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -88,6 +89,13 @@ private fun HomographyMosaicApp(
     templateRepository: TemplateRepository
 ) {
     var learningPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // System back / left-right edge swipe: return to previous in-app page, or stay put at root
+    BackHandler(enabled = true) {
+        if (learningPhotoUriString != null) {
+            learningPhotoUriString = null
+        }
+    }
 
     // Sub-1ms FAMTPL02 binary mmap cold-start preload (zero camera permissions needed)
     LaunchedEffect(Unit) {
